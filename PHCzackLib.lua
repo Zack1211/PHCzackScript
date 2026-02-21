@@ -504,6 +504,137 @@ function PHCzack:CreateWindow(config)
             return { Get = function() return selected end }
         end
 
+        -- ── Multi-Select Dropdown ────────────────────────────
+        -- callback receives a table of all currently selected values
+        -- e.g. {"Cosmic", "Legendary"}  (empty table = nothing selected)
+        function Tab:AddMultiDropdown(labelTxt, options, callback)
+            Tab._count = Tab._count + 1
+            local selected = {}   -- key = option string, value = true/false
+
+            -- ── Header row (always visible) ──────────────────
+            local Header = NewFrame(Scroll, UDim2.new(1,-6,0,40), nil, T.SURFACE)
+            Header.LayoutOrder = Tab._count
+            NewCorner(Header, 6) ; NewStroke(Header, T.BORDER)
+            NewLabel(Header, labelTxt, 13, T.TEXT, UDim2.new(0,10,0,0), UDim2.new(0.5,0,1,0))
+
+            local ValBtn = Instance.new("TextButton")
+            ValBtn.Size             = UDim2.new(0,140,0,28)
+            ValBtn.Position         = UDim2.new(1,-148,0.5,-14)
+            ValBtn.BackgroundColor3 = T.INPUT
+            ValBtn.Font             = Enum.Font.Code
+            ValBtn.TextSize         = 11
+            ValBtn.TextColor3       = T.ACCENT
+            ValBtn.Text             = "none v"
+            ValBtn.BorderSizePixel  = 0
+            ValBtn.AutoButtonColor  = false
+            ValBtn.TextTruncate     = Enum.TextTruncate.AtEnd
+            ValBtn.Parent           = Header
+            NewCorner(ValBtn, 5) ; NewStroke(ValBtn, T.BORDER)
+
+            -- ── Drop panel (rows = one option each) ──────────
+            Tab._count = Tab._count + 1
+            local Panel = NewFrame(Scroll, UDim2.new(1,-6,0, #options*34+8), nil, T.INPUT)
+            Panel.LayoutOrder = Tab._count
+            Panel.Visible     = false
+            NewCorner(Panel, 6) ; NewStroke(Panel, T.ACCENT)
+            NewPad(Panel, 4) ; NewList(Panel, 3)
+
+            -- Helper: rebuild the summary text in ValBtn
+            local function RefreshSummary()
+                local parts = {}
+                for _, opt in ipairs(options) do
+                    if selected[opt] then table.insert(parts, opt) end
+                end
+                ValBtn.Text = (#parts == 0) and "none v"
+                    or (#parts == 1) and (parts[1].." v")
+                    or (#parts == #options) and ("all ("..#parts..") v")
+                    or (#parts.." selected v")
+            end
+
+            -- Helper: fire callback with current selection list
+            local function FireCB()
+                local list = {}
+                for _, opt in ipairs(options) do
+                    if selected[opt] then table.insert(list, opt) end
+                end
+                if callback then pcall(callback, list) end
+            end
+
+            -- Build one row per option
+            local rowObjs = {}   -- stores {row, chkBox, chkMark, lbl} per option
+            for _, opt in ipairs(options) do
+                local row = NewFrame(Panel, UDim2.new(1,0,0,28), nil, T.SURFACE)
+                NewCorner(row, 4)
+
+                -- Checkbox square on the right side
+                local ChkBox  = NewFrame(row, UDim2.new(0,18,0,18), UDim2.new(1,-26,0.5,-9), T.INPUT)
+                NewCorner(ChkBox, 3) ; NewStroke(ChkBox, T.BORDER)
+                local ChkMark = NewLabel(ChkBox, "v", 12, T.WHITE, UDim2.new(0,0,0,0), UDim2.new(1,0,1,0))
+                ChkMark.TextXAlignment  = Enum.TextXAlignment.Center
+                ChkMark.TextTransparency = 1
+
+                local Lbl = NewLabel(row, "  "..opt, 12, T.TEXT, UDim2.new(0,0,0,0), UDim2.new(1,-30,1,0))
+                Lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+                -- Hover effect on the row
+                local HB = Instance.new("TextButton")
+                HB.Size = UDim2.new(1,0,1,0) ; HB.BackgroundTransparency = 1 ; HB.Text = "" ; HB.Parent = row
+                HB.MouseEnter:Connect(function() Tw(row, {BackgroundColor3 = Color3.fromRGB(25,35,50)}) end)
+                HB.MouseLeave:Connect(function() Tw(row, {BackgroundColor3 = T.SURFACE}) end)
+
+                HB.MouseButton1Click:Connect(function()
+                    selected[opt] = not selected[opt]
+                    local on = selected[opt]
+                    Tw(ChkBox,  {BackgroundColor3 = on and T.ACCENT or T.INPUT})
+                    Tw(ChkMark, {TextTransparency = on and 0 or 1})
+                    Lbl.TextColor3 = on and T.ACCENT or T.TEXT
+                    RefreshSummary()
+                    FireCB()
+                end)
+
+                rowObjs[opt] = {row=row, box=ChkBox, mark=ChkMark, lbl=Lbl}
+            end
+
+            -- Toggle panel open/close
+            local open = false
+            ValBtn.MouseButton1Click:Connect(function()
+                open = not open ; Panel.Visible = open
+            end)
+
+            return {
+                -- Returns table of selected option strings
+                Get = function()
+                    local list = {}
+                    for _, opt in ipairs(options) do
+                        if selected[opt] then table.insert(list, opt) end
+                    end
+                    return list
+                end,
+                -- Programmatically set selection: pass table of strings
+                Set = function(list)
+                    selected = {}
+                    for _, v in ipairs(list) do selected[v] = true end
+                    for opt, objs in pairs(rowObjs) do
+                        local on = selected[opt] == true
+                        objs.box.BackgroundColor3 = on and T.ACCENT or T.INPUT
+                        objs.mark.TextTransparency = on and 0 or 1
+                        objs.lbl.TextColor3 = on and T.ACCENT or T.TEXT
+                    end
+                    RefreshSummary()
+                end,
+                -- Clear all selections
+                Clear = function()
+                    selected = {}
+                    for _, objs in pairs(rowObjs) do
+                        objs.box.BackgroundColor3 = T.INPUT
+                        objs.mark.TextTransparency = 1
+                        objs.lbl.TextColor3 = T.TEXT
+                    end
+                    RefreshSummary()
+                end,
+            }
+        end
+
         -- ── Slider ──────────────────────────────────────────
         function Tab:AddSlider(labelTxt, min, max, default, callback)
             Tab._count = Tab._count + 1
