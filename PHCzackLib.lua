@@ -583,10 +583,17 @@ local PHCzack = {}
 PHCzack.KeyConfig = KEY_CONFIG
 PHCzack.KeySystem = KeySystem
 
+-- Track if key has already been validated this session
+local _keyValidatedThisSession = false
+local _validatedKey = nil
+local _validatedKeyData = nil
+
 -- ============================================================
--- PHCzack:CreateWindow(config)
+-- PHCzack:_CreateWindowInternal(config)
+-- The actual window builder (no key gate).
+-- This is called AFTER key validation passes.
 -- ============================================================
-function PHCzack:CreateWindow(config)
+function PHCzack:_CreateWindowInternal(config)
     config   = config or {}
     local title    = config.Title    or "PHCzack"
     local subtitle = config.SubTitle or "v2.0"
@@ -1238,72 +1245,110 @@ function PHCzack:CreateWindow(config)
     end -- AddTab
 
     return Window
-end -- CreateWindow
+end -- _CreateWindowInternal
 
 -- ============================================================
--- PHCzack:CreateWindowWithKey(config)
--- Shows key gate first, then creates the window on success.
--- config.Title, config.SubTitle are passed to CreateWindow.
--- config.KeyRequired = true (default) to enforce key check.
--- config.OnKeyValidated = function(key, data) ... end (optional)
+-- PHCzack:CreateWindow(config)
+--
+-- THE MAIN ENTRY POINT — **key system is built-in**.
+-- Every call to CreateWindow() shows the key gate FIRST.
+-- After the user validates their key, the window loads.
+--
+-- To SKIP the key check (e.g. for free scripts), pass:
+--   config.KeyRequired = false
+--
+-- Optional config fields:
+--   config.ApiUrl     — override KEY_CONFIG.API_URL
+--   config.ApiSecret  — override KEY_CONFIG.API_SECRET
+--   config.OnKeyValidated = function(key, data) end
 -- ============================================================
-function PHCzack:CreateWindowWithKey(config)
+function PHCzack:CreateWindow(config)
     config = config or {}
-    local keyRequired = (config.KeyRequired ~= false) -- default true
+    local keyRequired = (config.KeyRequired ~= false) -- default: true
 
+    -- If key check is disabled, go straight to window
     if not keyRequired then
-        return self:CreateWindow(config)
+        return self:_CreateWindowInternal(config)
     end
 
-    -- Update key config if user provided overrides
+    -- If already validated this session, skip the gate
+    if _keyValidatedThisSession and _validatedKey then
+        local win = self:_CreateWindowInternal(config)
+
+        -- Auto-add key info tab
+        if _validatedKeyData then
+            pcall(function()
+                local infoTab = win:AddTab("Key")
+                infoTab:AddLabel("Key Status: VALID", T.ACCENT)
+                if _validatedKeyData.expiration then
+                    infoTab:AddLabel("Expires: " .. tostring(_validatedKeyData.expiration))
+                end
+                if _validatedKeyData.days_remaining then
+                    infoTab:AddLabel("Days Left: " .. tostring(_validatedKeyData.days_remaining))
+                end
+            end)
+        end
+
+        if config.OnKeyValidated then
+            pcall(config.OnKeyValidated, _validatedKey, _validatedKeyData)
+        end
+
+        win:Show()
+        return win
+    end
+
+    -- Apply overrides
     if config.ApiUrl then KEY_CONFIG.API_URL = config.ApiUrl end
     if config.ApiSecret then KEY_CONFIG.API_SECRET = config.ApiSecret end
-    if config.WorkInkUrl then
-        KEY_CONFIG.WORKINK_URL = config.WorkInkUrl
-        KEY_CONFIG.API_PROVIDERS[1].url = config.WorkInkUrl
-    end
 
     -- Show the key gate, then create window on success
     local windowRef = nil
 
     KeySystem.ShowGate(function(key, data)
-        -- Key validated, create the actual window
-        windowRef = self:CreateWindow(config)
+        _keyValidatedThisSession = true
+        _validatedKey = key
+        _validatedKeyData = data
 
-        -- Call user's callback if provided
-        if config.OnKeyValidated then
-            pcall(config.OnKeyValidated, key, data)
+        -- Key validated — build the actual window
+        windowRef = self:_CreateWindowInternal(config)
+
+        -- Auto-add key info tab
+        if data then
+            pcall(function()
+                local infoTab = windowRef:AddTab("Key")
+                infoTab:AddLabel("Key Status: VALID", T.ACCENT)
+                if data.expiration then
+                    infoTab:AddLabel("Expires: " .. tostring(data.expiration))
+                end
+                if data.days_remaining then
+                    infoTab:AddLabel("Days Left: " .. tostring(data.days_remaining))
+                end
+            end)
         end
 
-        -- Add key info tab automatically
-        if data then
-            local infoTab = windowRef:AddTab("Key")
-            infoTab:AddLabel("Key Status: VALID", T.ACCENT)
-            if data.expiration then
-                infoTab:AddLabel("Expires: " .. tostring(data.expiration))
-            end
-            if data.days_remaining then
-                infoTab:AddLabel("Days Left: " .. tostring(data.days_remaining))
-            end
+        if config.OnKeyValidated then
+            pcall(config.OnKeyValidated, key, data)
         end
 
         windowRef:Show()
     end)
 
-    -- Return a proxy that waits for the real window
-    -- Scripts can call :Show() etc. even before key is validated
+    -- Return a proxy so scripts can chain calls (e.g. :AddTab)
+    -- before the key gate finishes. Calls queue up until window exists.
     local proxy = {}
     setmetatable(proxy, {
         __index = function(_, k)
             if windowRef then
                 return windowRef[k]
             end
-            -- Return no-op functions for calls before window exists
-            return function() end
+            return function() end -- no-op until window is ready
         end,
     })
     return proxy
 end
+
+-- CreateWindowWithKey is now just an alias (kept for backward compat)
+PHCzack.CreateWindowWithKey = PHCzack.CreateWindow
 
 -- ============================================================
 -- THIS LINE IS CRITICAL FOR loadstring() TO WORK
