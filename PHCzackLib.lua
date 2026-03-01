@@ -30,16 +30,14 @@ local KEY_CONFIG = {
     -- API secret (must match config.php API_SECRET)
     API_SECRET   = "PHCz_S3cR3t_K3y_2026!@#",
 
-    -- work.ink integration
-    -- Users complete tasks on work.ink, then receive a key
-    WORKINK_URL  = "https://work.ink/6bb06471-1e8b-4947-9561-6dec638b68f0",
-
-    -- Additional API providers (add more links here)
-    -- Format: {name = "Provider Name", url = "https://..."}
+    -- Provider links are fetched dynamically from your admin panel.
+    -- No need to hardcode work.ink URLs here!
+    -- The admin panel stores the link URLs you create on work.ink.
+    -- Fallback list (used if the API is unreachable):
     API_PROVIDERS = {
-        {name = "work.ink", url = "https://work.ink/6bb06471-1e8b-4947-9561-6dec638b68f0"},
-        -- Add more providers below:
-        -- {name = "linkvertise", url = "https://linkvertise.com/..."},
+        -- These get overwritten by fetching from your server.
+        -- Add manual fallbacks here only if needed:
+        -- {name = "work.ink", url = "https://work.ink/YOUR_SHORT_CODE"},
     },
 
     -- How often to re-validate the key (seconds). 0 = only on load
@@ -311,9 +309,53 @@ function KeySystem.Heartbeat(key)
 end
 
 -- ============================================================
+-- FETCH PROVIDER LINKS FROM SERVER
+-- Dynamically loads the "Get Key" URLs from your admin panel
+-- ============================================================
+function KeySystem.FetchProviders()
+    local ok, result = pcall(function()
+        if request or http_request or (syn and syn.request) then
+            local reqFn = request or http_request or syn.request
+            local res = reqFn({
+                Url = KEY_CONFIG.API_URL .. "?action=get_key_links",
+                Method = "GET",
+                Headers = {
+                    ["X-API-Key"] = KEY_CONFIG.API_SECRET,
+                    ["Accept"] = "application/json",
+                },
+            })
+            if res and res.Body then
+                local data = HttpService:JSONDecode(res.Body)
+                if data and data.success and data.providers then
+                    return data.providers
+                end
+            end
+        else
+            -- Fallback: HttpGet
+            local body = game:HttpGet(
+                KEY_CONFIG.API_URL .. "?action=get_key_links",
+                true
+            )
+            local data = HttpService:JSONDecode(body)
+            if data and data.success and data.providers then
+                return data.providers
+            end
+        end
+        return nil
+    end)
+    
+    if ok and result and #result > 0 then
+        KEY_CONFIG.API_PROVIDERS = result
+    end
+end
+
+-- ============================================================
 -- KEY SYSTEM UI - Shows a key entry screen before loading lib
 -- ============================================================
 function KeySystem.ShowGate(onSuccess)
+    -- Fetch latest provider links from server
+    pcall(function() KeySystem.FetchProviders() end)
+    
     local guiName = "PHCzack_KeyGate"
 
     -- Clean up any existing gate
