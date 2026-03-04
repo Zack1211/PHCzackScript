@@ -323,8 +323,14 @@ function KeySystem.FetchProviders()
             })
             if res and res.Body then
                 local data = HttpService:JSONDecode(res.Body)
-                if data and data.success and data.providers then
-                    return data.providers
+                if data and data.success then
+                    -- Store weekend_free flag from server
+                    if data.weekend_free ~= nil then
+                        KEY_CONFIG._weekend_free = data.weekend_free
+                    end
+                    if data.providers then
+                        return data.providers
+                    end
                 end
             end
         end
@@ -332,8 +338,13 @@ function KeySystem.FetchProviders()
         -- Fallback: HttpGet (no headers, but endpoint is public)
         local body = game:HttpGet(providerUrl, true)
         local data = HttpService:JSONDecode(body)
-        if data and data.success and data.providers then
-            return data.providers
+        if data and data.success then
+            if data.weekend_free ~= nil then
+                KEY_CONFIG._weekend_free = data.weekend_free
+            end
+            if data.providers then
+                return data.providers
+            end
         end
 
         return nil
@@ -1291,23 +1302,22 @@ function PHCzack:CreateWindow(config)
     if config.ApiUrl then KEY_CONFIG.API_URL = config.ApiUrl end
     if config.ApiSecret then KEY_CONFIG.API_SECRET = config.ApiSecret end
 
+    -- Fetch providers early to check weekend_free flag
+    pcall(function() KeySystem.FetchProviders() end)
+
+    -- Weekend-free bypass: skip key gate entirely on Sat/Sun when enabled
+    if KEY_CONFIG._weekend_free == true then
+        local win = self:_CreateWindowInternal(config)
+        if config.OnKeyValidated then
+            pcall(config.OnKeyValidated, "WEEKEND_FREE", {weekend = true})
+        end
+        win:Show()
+        return win
+    end
+
     -- If already validated this session, skip the gate
     if _keyValidatedThisSession and _validatedKey then
         local win = self:_CreateWindowInternal(config)
-
-        -- Auto-add key info tab
-        if _validatedKeyData then
-            pcall(function()
-                local infoTab = win:AddTab("Key")
-                infoTab:AddLabel("Key Status: VALID", T.ACCENT)
-                if _validatedKeyData.expiration then
-                    infoTab:AddLabel("Expires: " .. tostring(_validatedKeyData.expiration))
-                end
-                if _validatedKeyData.days_remaining then
-                    infoTab:AddLabel("Days Left: " .. tostring(_validatedKeyData.days_remaining))
-                end
-            end)
-        end
 
         if config.OnKeyValidated then
             pcall(config.OnKeyValidated, _validatedKey, _validatedKeyData)
@@ -1328,20 +1338,6 @@ function PHCzack:CreateWindow(config)
 
         -- Key validated — build the actual window
         windowRef = self:_CreateWindowInternal(config)
-
-        -- Auto-add key info tab
-        if data then
-            pcall(function()
-                local infoTab = windowRef:AddTab("Key")
-                infoTab:AddLabel("Key Status: VALID", T.ACCENT)
-                if data.expiration then
-                    infoTab:AddLabel("Expires: " .. tostring(data.expiration))
-                end
-                if data.days_remaining then
-                    infoTab:AddLabel("Days Left: " .. tostring(data.days_remaining))
-                end
-            end)
-        end
 
         if config.OnKeyValidated then
             pcall(config.OnKeyValidated, key, data)
