@@ -1,4 +1,4 @@
--- // PHCzack UI Library v2.0
+-- // PHCzack UI Library v2.0 + Online Key System
 -- // GitHub raw link usage:
 -- //   local PHCzack = loadstring(game:HttpGet("YOUR_RAW_URL"))()
 -- //
@@ -16,8 +16,45 @@ local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
 local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local HttpService      = game:GetService("HttpService")
 local CoreGui          = game:GetService("CoreGui")
 local LocalPlayer      = Players.LocalPlayer
+
+-- ============================================================
+-- KEY SYSTEM CONFIGURATION
+-- Change these to match your server setup
+-- ============================================================
+local KEY_CONFIG = {
+    -- ================================================================
+    -- MODE: Choose your key system backend
+    --   "php"    = Your own PHP server (api.php)
+    --   "junkie" = work.ink / Junkie SDK (no PHP server needed)
+    -- ================================================================
+    MODE = "junkie",
+
+    -- ================================================================
+    -- PHP MODE settings (only used when MODE = "php")
+    -- ================================================================
+    API_URL      = "http://witchcraftpannel.x10.mx/api.php",
+    API_SECRET   = "PHCz_S3cR3t_K3y_2026!@#",
+
+    -- Provider links are fetched dynamically from your admin panel.
+    API_PROVIDERS = {},
+
+    -- ================================================================
+    -- JUNKIE MODE settings (only used when MODE = "junkie")
+    -- Get these from https://jnkie.com/dashboard
+    -- ================================================================
+    JUNKIE_SERVICE    = "PHCzackScript",       -- your service name on Junkie
+    JUNKIE_IDENTIFIER = "1033979",             -- your link ID from Junkie dashboard
+    JUNKIE_PROVIDER   = "6bb06471-1e8b-4947-9561-6dec638b68f0", -- your provider key
+
+    -- ================================================================
+    -- SHARED settings
+    -- ================================================================
+    HEARTBEAT_INTERVAL = 300,
+    KEY_FILE     = "PHCzack_key.dat",
+}
 
 -- ============================================================
 -- THEME
@@ -153,14 +190,562 @@ local function GetParent()
 end
 
 -- ============================================================
+-- DEVICE ID GENERATOR
+-- Creates a unique device fingerprint for key binding
+-- ============================================================
+local function GetDeviceId()
+    local parts = {
+        tostring(LocalPlayer.UserId),
+        tostring(game.PlaceId),
+        game:GetService("RbxAnalyticsService"):GetClientId() or "unknown"
+    }
+    -- Simple hash
+    local str = table.concat(parts, "-")
+    local hash = 0
+    for i = 1, #str do
+        hash = (hash * 31 + string.byte(str, i)) % 0x7FFFFFFF
+    end
+    return string.format("RBXDEV-%08X-%s", hash, tostring(LocalPlayer.UserId))
+end
+
+-- ============================================================
+-- KEY SYSTEM - HTTP HELPERS
+-- ============================================================
+local KeySystem = {}
+
+function KeySystem.SaveKey(key)
+    pcall(function()
+        if writefile then
+            writefile(KEY_CONFIG.KEY_FILE, key)
+        end
+    end)
+end
+
+function KeySystem.LoadKey()
+    local ok, result = pcall(function()
+        if readfile and isfile and isfile(KEY_CONFIG.KEY_FILE) then
+            return readfile(KEY_CONFIG.KEY_FILE)
+        end
+        return nil
+    end)
+    return ok and result or nil
+end
+
+function KeySystem.DeleteKey()
+    pcall(function()
+        if delfile and isfile and isfile(KEY_CONFIG.KEY_FILE) then
+            delfile(KEY_CONFIG.KEY_FILE)
+        end
+    end)
+end
+
+function KeySystem.ValidateKey(key)
+    local deviceId = GetDeviceId()
+    local deviceInfo = string.format("%s | PlaceId: %d | OS: %s",
+        LocalPlayer.Name, game.PlaceId, UserInputService:GetPlatform().Name)
+
+    local success, response
+
+    -- ALWAYS try request() first — it sends X-API-Key header (required by server)
+    success, response = pcall(function()
+        local reqFn = request or http_request or (syn and syn.request)
+        if reqFn then
+            local res = reqFn({
+                Url = KEY_CONFIG.API_URL,
+                Method = "POST",
+                Headers = {
+                    ["Content-Type"] = "application/json",
+                    ["X-API-Key"] = KEY_CONFIG.API_SECRET,
+                },
+                Body = HttpService:JSONEncode({
+                    action = "validate",
+                    key = key,
+                    device_id = deviceId,
+                    device_info = deviceInfo,
+                }),
+            })
+            return res.Body
+        end
+        error("no_request_fn")
+    end)
+
+    -- Fallback: HttpGet with api_key as query param (no header support)
+    if not success then
+        success, response = pcall(function()
+            return game:HttpGet(
+                KEY_CONFIG.API_URL .. "?" ..
+                "action=validate" ..
+                "&api_key=" .. HttpService:UrlEncode(KEY_CONFIG.API_SECRET) ..
+                "&key=" .. HttpService:UrlEncode(key) ..
+                "&device_id=" .. HttpService:UrlEncode(deviceId) ..
+                "&device_info=" .. HttpService:UrlEncode(deviceInfo),
+                true
+            )
+        end)
+    end
+
+    if not success then
+        return false, "HTTP request failed: " .. tostring(response)
+    end
+
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(response)
+    end)
+
+    if not ok or not data then
+        return false, "Invalid server response"
+    end
+
+    return data.success == true, data.message or "Unknown error", data.data
+end
+
+function KeySystem.Heartbeat(key)
+    local deviceId = GetDeviceId()
+    pcall(function()
+        if request or http_request or (syn and syn.request) then
+            local reqFn = request or http_request or syn.request
+            reqFn({
+                Url = KEY_CONFIG.API_URL,
+                Method = "POST",
+                Headers = {
+                    ["Content-Type"] = "application/json",
+                    ["X-API-Key"] = KEY_CONFIG.API_SECRET,
+                },
+                Body = HttpService:JSONEncode({
+                    action = "heartbeat",
+                    key = key,
+                    device_id = deviceId,
+                }),
+            })
+        end
+    end)
+end
+
+-- ============================================================
+-- FETCH PROVIDER LINKS FROM SERVER
+-- Dynamically loads the "Get Key" URLs from your admin panel
+-- ============================================================
+function KeySystem.FetchProviders()
+    local ok, result = pcall(function()
+        if request or http_request or (syn and syn.request) then
+            local reqFn = request or http_request or syn.request
+            local res = reqFn({
+                Url = KEY_CONFIG.API_URL .. "?action=get_key_links",
+                Method = "GET",
+                Headers = {
+                    ["X-API-Key"] = KEY_CONFIG.API_SECRET,
+                    ["Accept"] = "application/json",
+                },
+            })
+            if res and res.Body then
+                local data = HttpService:JSONDecode(res.Body)
+                if data and data.success and data.providers then
+                    return data.providers
+                end
+            end
+        else
+            -- Fallback: HttpGet
+            local body = game:HttpGet(
+                KEY_CONFIG.API_URL .. "?action=get_key_links",
+                true
+            )
+            local data = HttpService:JSONDecode(body)
+            if data and data.success and data.providers then
+                return data.providers
+            end
+        end
+        return nil
+    end)
+    
+    if ok and result and #result > 0 then
+        KEY_CONFIG.API_PROVIDERS = result
+    end
+end
+
+-- ============================================================
+-- JUNKIE SDK INTEGRATION
+-- Loads the official work.ink / Junkie SDK for key verification
+-- When MODE = "junkie", no PHP server is needed.
+-- ============================================================
+local _Junkie = nil
+local _junkieLoaded = false
+
+function KeySystem.LoadJunkie()
+    if _junkieLoaded then return _Junkie ~= nil end
+    _junkieLoaded = true
+    local ok, err = pcall(function()
+        _Junkie = loadstring(game:HttpGet("https://jnkie.com/sdk/library.lua"))()
+        _Junkie.service    = KEY_CONFIG.JUNKIE_SERVICE
+        _Junkie.identifier = KEY_CONFIG.JUNKIE_IDENTIFIER
+        _Junkie.provider   = KEY_CONFIG.JUNKIE_PROVIDER
+    end)
+    if not ok then
+        warn("[PHCzack] Failed to load Junkie SDK: " .. tostring(err))
+        _Junkie = nil
+        return false
+    end
+    return true
+end
+
+function KeySystem.JunkieGetLink()
+    if not _Junkie then return nil end
+    local ok, link = pcall(function()
+        return _Junkie.get_key_link()
+    end)
+    return ok and link or nil
+end
+
+function KeySystem.JunkieValidate(key)
+    if not _Junkie then return false, "Junkie SDK not loaded" end
+    local ok, result = pcall(function()
+        return _Junkie.check_key(key)
+    end)
+    if not ok then
+        return false, "Junkie check failed: " .. tostring(result)
+    end
+    -- Junkie.check_key returns true/false directly, or a table
+    if type(result) == "boolean" then
+        return result, result and "Key valid!" or "Invalid key"
+    end
+    if type(result) == "table" then
+        if result.valid then
+            return true, result.message or "Key valid!", result
+        end
+        return false, result.message or "Invalid key"
+    end
+    -- If result is truthy
+    if result then
+        return true, "Key valid!"
+    end
+    return false, "Invalid key"
+end
+
+-- ============================================================
+-- KEY SYSTEM UI - Shows a key entry screen before loading lib
+-- ============================================================
+function KeySystem.ShowGate(onSuccess)
+    local isJunkie = (KEY_CONFIG.MODE == "junkie")
+    local junkieLink = nil
+
+    if isJunkie then
+        -- Load the Junkie SDK for work.ink key system
+        local loaded = KeySystem.LoadJunkie()
+        if loaded then
+            junkieLink = KeySystem.JunkieGetLink()
+        end
+    else
+        -- PHP mode: fetch provider links from your server
+        pcall(function() KeySystem.FetchProviders() end)
+    end
+
+    local guiName = "PHCzack_KeyGate"
+
+    -- Clean up any existing gate
+    pcall(function()
+        for _, v in ipairs(GetParent():GetChildren()) do
+            if v.Name == guiName then v:Destroy() end
+        end
+    end)
+
+    local ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name           = guiName
+    ScreenGui.ResetOnSpawn   = false
+    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    ScreenGui.DisplayOrder   = 10000
+    pcall(function() ScreenGui.IgnoreGuiInset = true end)
+    ScreenGui.Parent         = GetParent()
+
+    -- Background overlay
+    local Overlay = Instance.new("Frame")
+    Overlay.Size = UDim2.new(1,0,1,0)
+    Overlay.BackgroundColor3 = Color3.fromRGB(0,0,0)
+    Overlay.BackgroundTransparency = 0.3
+    Overlay.BorderSizePixel = 0
+    Overlay.Parent = ScreenGui
+
+    -- Main card
+    local Card = NewFrame(ScreenGui, UDim2.new(0,380,0,0), UDim2.new(0.5,-190,0.5,-180), T.BG)
+    Card.ClipsDescendants = true
+    NewCorner(Card, 10)
+    NewStroke(Card, T.ACCENT, 1.5)
+
+    -- Animate open
+    task.spawn(function()
+        task.wait(0.05)
+        Tw(Card, {Size = UDim2.new(0,380,0,360)}, 0.35)
+    end)
+
+    -- Header bar
+    local Header = NewFrame(Card, UDim2.new(1,0,0,50), UDim2.new(0,0,0,0), T.SURFACE)
+    local titleLbl = NewLabel(Header, "  PHCzack // KEY SYSTEM", 14, T.ACCENT, UDim2.new(0,10,0,0), UDim2.new(1,-50,1,0))
+    titleLbl.Font = Enum.Font.Code
+
+    -- Close / X button
+    local CloseBtn = Instance.new("TextButton")
+    CloseBtn.Size             = UDim2.new(0,30,0,30)
+    CloseBtn.Position         = UDim2.new(1,-38,0,10)
+    CloseBtn.BackgroundColor3 = Color3.fromRGB(60,20,20)
+    CloseBtn.Font             = Enum.Font.Code
+    CloseBtn.TextSize         = 16
+    CloseBtn.TextColor3       = T.DANGER
+    CloseBtn.Text             = "X"
+    CloseBtn.BorderSizePixel  = 0
+    CloseBtn.AutoButtonColor  = false
+    CloseBtn.Parent           = Header
+    NewCorner(CloseBtn, 6)
+
+    CloseBtn.MouseEnter:Connect(function()
+        Tw(CloseBtn, {BackgroundColor3 = T.DANGER})
+        Tw(CloseBtn, {TextColor3 = T.BG})
+    end)
+    CloseBtn.MouseLeave:Connect(function()
+        Tw(CloseBtn, {BackgroundColor3 = Color3.fromRGB(60,20,20)})
+        Tw(CloseBtn, {TextColor3 = T.DANGER})
+    end)
+    CloseBtn.MouseButton1Click:Connect(function()
+        Tw(Card, {Size = UDim2.new(0,380,0,0)}, 0.25)
+        task.wait(0.3)
+        ScreenGui:Destroy()
+    end)
+
+    -- Accent line
+    local AccLine = NewFrame(Card, UDim2.new(1,0,0,2), UDim2.new(0,0,0,50), T.ACCENT)
+
+    -- Subtitle
+    local subLbl = NewLabel(Card, "Enter your license key to continue", 12, T.DIM, UDim2.new(0,24,0,62), UDim2.new(1,-48,0,20))
+    subLbl.TextXAlignment = Enum.TextXAlignment.Center
+
+    -- Key input box
+    local InputBG = NewFrame(Card, UDim2.new(1,-48,0,38), UDim2.new(0,24,0,94), T.INPUT)
+    NewCorner(InputBG, 6)
+    NewStroke(InputBG, T.BORDER)
+
+    local KeyInput = Instance.new("TextBox")
+    KeyInput.Size              = UDim2.new(1,-16,1,0)
+    KeyInput.Position          = UDim2.new(0,8,0,0)
+    KeyInput.BackgroundTransparency = 1
+    KeyInput.Font              = Enum.Font.Code
+    KeyInput.TextSize          = 13
+    KeyInput.TextColor3        = T.ACCENT
+    KeyInput.PlaceholderText   = "PHCz-XXXXXXXX-XXXXXXXX"
+    KeyInput.PlaceholderColor3 = T.DIM
+    KeyInput.Text              = ""
+    KeyInput.ClearTextOnFocus  = false
+    KeyInput.Parent            = InputBG
+
+    -- Status label
+    local StatusLbl = NewLabel(Card, "", 11, T.DIM, UDim2.new(0,24,0,140), UDim2.new(1,-48,0,18))
+    StatusLbl.TextXAlignment = Enum.TextXAlignment.Center
+
+    -- Validate button
+    local ValidateBtn = Instance.new("TextButton")
+    ValidateBtn.Size             = UDim2.new(1,-48,0,38)
+    ValidateBtn.Position         = UDim2.new(0,24,0,166)
+    ValidateBtn.BackgroundColor3 = T.ACCENT
+    ValidateBtn.Font             = Enum.Font.Code
+    ValidateBtn.TextSize         = 14
+    ValidateBtn.TextColor3       = T.BG
+    ValidateBtn.Text             = "[ VALIDATE KEY ]"
+    ValidateBtn.BorderSizePixel  = 0
+    ValidateBtn.AutoButtonColor  = false
+    ValidateBtn.Parent           = Card
+    NewCorner(ValidateBtn, 6)
+
+    -- Separator
+    local sepLbl = NewLabel(Card, "--- or get a key ---", 10, T.DIM, UDim2.new(0,24,0,216), UDim2.new(1,-48,0,18))
+    sepLbl.TextXAlignment = Enum.TextXAlignment.Center
+
+    -- Get Key buttons
+    local btnY = 242
+
+    if isJunkie then
+        -- JUNKIE MODE: single "Get Key via work.ink" button
+        local linkUrl = junkieLink or ("https://work.ink/" .. KEY_CONFIG.JUNKIE_IDENTIFIER)
+        local GetKeyBtn = Instance.new("TextButton")
+        GetKeyBtn.Size             = UDim2.new(1,-48,0,34)
+        GetKeyBtn.Position         = UDim2.new(0,24,0,btnY)
+        GetKeyBtn.BackgroundColor3 = T.SURFACE
+        GetKeyBtn.Font             = Enum.Font.Code
+        GetKeyBtn.TextSize         = 12
+        GetKeyBtn.TextColor3       = T.ACCENT2
+        GetKeyBtn.Text             = "[ GET KEY via WORK.INK ]"
+        GetKeyBtn.BorderSizePixel  = 0
+        GetKeyBtn.AutoButtonColor  = false
+        GetKeyBtn.Parent           = Card
+        NewCorner(GetKeyBtn, 6)
+        NewStroke(GetKeyBtn, T.BORDER)
+
+        GetKeyBtn.MouseEnter:Connect(function()
+            Tw(GetKeyBtn, {BackgroundColor3 = Color3.fromRGB(20,30,50)})
+        end)
+        GetKeyBtn.MouseLeave:Connect(function()
+            Tw(GetKeyBtn, {BackgroundColor3 = T.SURFACE})
+        end)
+
+        GetKeyBtn.MouseButton1Click:Connect(function()
+            pcall(function()
+                if setclipboard then
+                    setclipboard(linkUrl)
+                    StatusLbl.Text = "Link copied! Complete tasks in browser, get your key."
+                    StatusLbl.TextColor3 = T.ACCENT2
+                end
+            end)
+        end)
+        btnY = btnY + 40
+    else
+        -- PHP MODE: one button per provider from admin panel
+        for i, provider in ipairs(KEY_CONFIG.API_PROVIDERS) do
+            local GetKeyBtn = Instance.new("TextButton")
+            GetKeyBtn.Size             = UDim2.new(1,-48,0,34)
+            GetKeyBtn.Position         = UDim2.new(0,24,0,btnY)
+            GetKeyBtn.BackgroundColor3 = T.SURFACE
+            GetKeyBtn.Font             = Enum.Font.Code
+            GetKeyBtn.TextSize         = 12
+            GetKeyBtn.TextColor3       = T.ACCENT2
+            GetKeyBtn.Text             = "[ GET KEY via " .. string.upper(provider.name) .. " ]"
+            GetKeyBtn.BorderSizePixel  = 0
+            GetKeyBtn.AutoButtonColor  = false
+            GetKeyBtn.Parent           = Card
+            NewCorner(GetKeyBtn, 6)
+            NewStroke(GetKeyBtn, T.BORDER)
+
+            GetKeyBtn.MouseEnter:Connect(function()
+                Tw(GetKeyBtn, {BackgroundColor3 = Color3.fromRGB(20,30,50)})
+            end)
+            GetKeyBtn.MouseLeave:Connect(function()
+                Tw(GetKeyBtn, {BackgroundColor3 = T.SURFACE})
+            end)
+
+            GetKeyBtn.MouseButton1Click:Connect(function()
+                pcall(function()
+                    if setclipboard then
+                        setclipboard(provider.url)
+                        StatusLbl.Text = "Link copied! Complete tasks, then enter your key."
+                        StatusLbl.TextColor3 = T.ACCENT2
+                    end
+                end)
+            end)
+
+            btnY = btnY + 40
+        end
+    end
+
+    -- Footer
+    local footerLbl = NewLabel(Card,
+        isJunkie and "PHCzack + work.ink v1.0" or "PHCzack Key System v1.0",
+        9, Color3.fromRGB(40,50,65),
+        UDim2.new(0,0,1,-20), UDim2.new(1,0,0,18))
+    footerLbl.TextXAlignment = Enum.TextXAlignment.Center
+
+    -- Helper: validate key using the active mode
+    local function DoValidate(key)
+        if isJunkie then
+            return KeySystem.JunkieValidate(key)
+        else
+            return KeySystem.ValidateKey(key)
+        end
+    end
+
+    -- Try loading saved key first
+    local savedKey = KeySystem.LoadKey()
+    if savedKey and #savedKey > 3 then
+        KeyInput.Text = savedKey
+        StatusLbl.Text = "Checking saved key..."
+        StatusLbl.TextColor3 = T.ACCENT
+
+        task.spawn(function()
+            local valid, msg, data = DoValidate(savedKey)
+            if valid then
+                StatusLbl.Text = "Key valid! Loading..."
+                StatusLbl.TextColor3 = T.ACCENT
+                Tw(Card, {Size = UDim2.new(0,380,0,0)}, 0.25)
+                task.wait(0.3)
+                ScreenGui:Destroy()
+                if onSuccess then onSuccess(savedKey, data) end
+            else
+                StatusLbl.Text = "Saved key invalid: " .. tostring(msg)
+                StatusLbl.TextColor3 = T.DANGER
+                KeySystem.DeleteKey()
+                KeyInput.Text = ""
+            end
+        end)
+    end
+
+    -- Validate button click
+    ValidateBtn.MouseButton1Click:Connect(function()
+        local key = KeyInput.Text:match("^%s*(.-)%s*$") -- trim
+        if not key or #key < 3 then
+            StatusLbl.Text = "Please enter a valid key"
+            StatusLbl.TextColor3 = T.DANGER
+            return
+        end
+
+        ValidateBtn.Text = "[ CHECKING... ]"
+        ValidateBtn.BackgroundColor3 = T.DIM
+        StatusLbl.Text = "Validating..."
+        StatusLbl.TextColor3 = T.DIM
+
+        task.spawn(function()
+            local valid, msg, data = DoValidate(key)
+            if valid then
+                StatusLbl.Text = "Access granted!"
+                StatusLbl.TextColor3 = T.ACCENT
+                ValidateBtn.Text = "[ SUCCESS ]"
+                ValidateBtn.BackgroundColor3 = T.ACCENT
+
+                -- Save key locally
+                KeySystem.SaveKey(key)
+
+                -- Start heartbeat loop (PHP mode only)
+                if not isJunkie and KEY_CONFIG.HEARTBEAT_INTERVAL > 0 then
+                    task.spawn(function()
+                        while true do
+                            task.wait(KEY_CONFIG.HEARTBEAT_INTERVAL)
+                            KeySystem.Heartbeat(key)
+                        end
+                    end)
+                end
+
+                Tw(Card, {Size = UDim2.new(0,380,0,0)}, 0.25)
+                task.wait(0.3)
+                ScreenGui:Destroy()
+                if onSuccess then onSuccess(key, data) end
+            else
+                StatusLbl.Text = tostring(msg)
+                StatusLbl.TextColor3 = T.DANGER
+                ValidateBtn.Text = "[ VALIDATE KEY ]"
+                ValidateBtn.BackgroundColor3 = T.ACCENT
+                Tw(InputBG, {BackgroundColor3 = Color3.fromRGB(40,10,10)}, 0.1)
+                task.delay(0.3, function()
+                    Tw(InputBG, {BackgroundColor3 = T.INPUT}, 0.2)
+                end)
+            end
+        end)
+    end)
+
+    MakeDraggable(Card, Header)
+end
+
+-- ============================================================
 -- LIBRARY TABLE  <-- this is what gets returned to the caller
 -- ============================================================
 local PHCzack = {}
 
+-- Store key config so scripts can update it before calling :CreateWindow
+PHCzack.KeyConfig = KEY_CONFIG
+PHCzack.KeySystem = KeySystem
+
+-- Track if key has already been validated this session
+local _keyValidatedThisSession = false
+local _validatedKey = nil
+local _validatedKeyData = nil
+
 -- ============================================================
--- PHCzack:CreateWindow(config)
+-- PHCzack:_CreateWindowInternal(config)
+-- The actual window builder (no key gate).
+-- This is called AFTER key validation passes.
 -- ============================================================
-function PHCzack:CreateWindow(config)
+function PHCzack:_CreateWindowInternal(config)
     config   = config or {}
     local title    = config.Title    or "PHCzack"
     local subtitle = config.SubTitle or "v2.0"
@@ -812,7 +1397,118 @@ function PHCzack:CreateWindow(config)
     end -- AddTab
 
     return Window
-end -- CreateWindow
+end -- _CreateWindowInternal
+
+-- ============================================================
+-- PHCzack:CreateWindow(config)
+--
+-- THE MAIN ENTRY POINT — **key system is built-in**.
+-- Every call to CreateWindow() shows the key gate FIRST.
+-- After the user validates their key, the window loads.
+--
+-- To SKIP the key check (e.g. for free scripts), pass:
+--   config.KeyRequired = false
+--
+-- Optional config fields:
+--   config.Mode          — "junkie" or "php" (override KEY_CONFIG.MODE)
+--   config.ApiUrl        — override KEY_CONFIG.API_URL  (PHP mode)
+--   config.ApiSecret     — override KEY_CONFIG.API_SECRET (PHP mode)
+--   config.JunkieService    — override JUNKIE_SERVICE
+--   config.JunkieIdentifier — override JUNKIE_IDENTIFIER
+--   config.JunkieProvider   — override JUNKIE_PROVIDER
+--   config.OnKeyValidated = function(key, data) end
+-- ============================================================
+function PHCzack:CreateWindow(config)
+    config = config or {}
+    local keyRequired = (config.KeyRequired ~= false) -- default: true
+
+    -- If key check is disabled, go straight to window
+    if not keyRequired then
+        return self:_CreateWindowInternal(config)
+    end
+
+    -- Apply overrides before showing the gate
+    if config.Mode then KEY_CONFIG.MODE = config.Mode end
+    if config.ApiUrl then KEY_CONFIG.API_URL = config.ApiUrl end
+    if config.ApiSecret then KEY_CONFIG.API_SECRET = config.ApiSecret end
+    if config.JunkieService then KEY_CONFIG.JUNKIE_SERVICE = config.JunkieService end
+    if config.JunkieIdentifier then KEY_CONFIG.JUNKIE_IDENTIFIER = config.JunkieIdentifier end
+    if config.JunkieProvider then KEY_CONFIG.JUNKIE_PROVIDER = config.JunkieProvider end
+
+    -- If already validated this session, skip the gate
+    if _keyValidatedThisSession and _validatedKey then
+        local win = self:_CreateWindowInternal(config)
+
+        -- Auto-add key info tab
+        if _validatedKeyData then
+            pcall(function()
+                local infoTab = win:AddTab("Key")
+                infoTab:AddLabel("Key Status: VALID", T.ACCENT)
+                if _validatedKeyData.expiration then
+                    infoTab:AddLabel("Expires: " .. tostring(_validatedKeyData.expiration))
+                end
+                if _validatedKeyData.days_remaining then
+                    infoTab:AddLabel("Days Left: " .. tostring(_validatedKeyData.days_remaining))
+                end
+            end)
+        end
+
+        if config.OnKeyValidated then
+            pcall(config.OnKeyValidated, _validatedKey, _validatedKeyData)
+        end
+
+        win:Show()
+        return win
+    end
+
+    -- Show the key gate, then create window on success
+    local windowRef = nil
+
+    KeySystem.ShowGate(function(key, data)
+        _keyValidatedThisSession = true
+        _validatedKey = key
+        _validatedKeyData = data
+
+        -- Key validated — build the actual window
+        windowRef = self:_CreateWindowInternal(config)
+
+        -- Auto-add key info tab
+        if data then
+            pcall(function()
+                local infoTab = windowRef:AddTab("Key")
+                infoTab:AddLabel("Key Status: VALID", T.ACCENT)
+                if data.expiration then
+                    infoTab:AddLabel("Expires: " .. tostring(data.expiration))
+                end
+                if data.days_remaining then
+                    infoTab:AddLabel("Days Left: " .. tostring(data.days_remaining))
+                end
+            end)
+        end
+
+        if config.OnKeyValidated then
+            pcall(config.OnKeyValidated, key, data)
+        end
+
+        windowRef:Show()
+    end)
+
+    -- Return a proxy so scripts can chain calls (e.g. :AddTab)
+    -- before the key gate finishes. Calls queue up until window exists.
+    local proxy = {}
+    setmetatable(proxy, {
+        __index = function(_, k)
+            if windowRef then
+                return windowRef[k]
+            end
+            return function() end -- no-op until window is ready
+        end,
+    })
+    return proxy
+end
+
+-- CreateWindowWithKey is now just an alias (kept for backward compat)
+PHCzack.CreateWindowWithKey = PHCzack.CreateWindow
 
 -- ============================================================
 -- THIS LINE IS CRITICAL FOR loadstring() TO WORK
