@@ -26,14 +26,8 @@ local LocalPlayer      = Players.LocalPlayer
 -- ============================================================
 local KEY_CONFIG = {
     -- ================================================================
-    -- MODE: Choose your key system backend
-    --   "php"    = Your own PHP server (api.php)
-    --   "junkie" = work.ink / Junkie SDK (no PHP server needed)
-    -- ================================================================
-    MODE = "junkie",
-
-    -- ================================================================
-    -- PHP MODE settings (only used when MODE = "php")
+    -- Your PHP admin panel at witchcraftpannel.x10.mx
+    -- Manage keys & providers at: /admin.php?page=api_providers
     -- ================================================================
     API_URL      = "http://witchcraftpannel.x10.mx/api.php",
     API_SECRET   = "PHCz_S3cR3t_K3y_2026!@#",
@@ -41,17 +35,7 @@ local KEY_CONFIG = {
     -- Provider links are fetched dynamically from your admin panel.
     API_PROVIDERS = {},
 
-    -- ================================================================
-    -- JUNKIE MODE settings (only used when MODE = "junkie")
-    -- Get these from https://jnkie.com/dashboard
-    -- ================================================================
-    JUNKIE_SERVICE    = "PHCzackScript",       -- your service name on Junkie
-    JUNKIE_IDENTIFIER = "1033979",             -- your link ID from Junkie dashboard
-    JUNKIE_PROVIDER   = "6bb06471-1e8b-4947-9561-6dec638b68f0", -- your provider key
-
-    -- ================================================================
-    -- SHARED settings
-    -- ================================================================
+    -- Heartbeat interval (seconds) — keeps keys alive on your server
     HEARTBEAT_INTERVAL = 300,
     KEY_FILE     = "PHCzack_key.dat",
 }
@@ -326,16 +310,16 @@ end
 -- Dynamically loads the "Get Key" URLs from your admin panel
 -- ============================================================
 function KeySystem.FetchProviders()
+    local providerUrl = KEY_CONFIG.API_URL .. "?action=get_key_links"
+
     local ok, result = pcall(function()
-        if request or http_request or (syn and syn.request) then
-            local reqFn = request or http_request or syn.request
+        -- Try request() first (supports headers)
+        local reqFn = request or http_request or (syn and syn.request)
+        if reqFn then
             local res = reqFn({
-                Url = KEY_CONFIG.API_URL .. "?action=get_key_links",
+                Url    = providerUrl,
                 Method = "GET",
-                Headers = {
-                    ["X-API-Key"] = KEY_CONFIG.API_SECRET,
-                    ["Accept"] = "application/json",
-                },
+                Headers = { ["Accept"] = "application/json" },
             })
             if res and res.Body then
                 local data = HttpService:JSONDecode(res.Body)
@@ -343,100 +327,29 @@ function KeySystem.FetchProviders()
                     return data.providers
                 end
             end
-        else
-            -- Fallback: HttpGet
-            local body = game:HttpGet(
-                KEY_CONFIG.API_URL .. "?action=get_key_links",
-                true
-            )
-            local data = HttpService:JSONDecode(body)
-            if data and data.success and data.providers then
-                return data.providers
-            end
         end
+
+        -- Fallback: HttpGet (no headers, but endpoint is public)
+        local body = game:HttpGet(providerUrl, true)
+        local data = HttpService:JSONDecode(body)
+        if data and data.success and data.providers then
+            return data.providers
+        end
+
         return nil
     end)
-    
+
     if ok and result and #result > 0 then
         KEY_CONFIG.API_PROVIDERS = result
     end
 end
 
 -- ============================================================
--- JUNKIE SDK INTEGRATION
--- Loads the official work.ink / Junkie SDK for key verification
--- When MODE = "junkie", no PHP server is needed.
--- ============================================================
-local _Junkie = nil
-local _junkieLoaded = false
-
-function KeySystem.LoadJunkie()
-    if _junkieLoaded then return _Junkie ~= nil end
-    _junkieLoaded = true
-    local ok, err = pcall(function()
-        _Junkie = loadstring(game:HttpGet("https://jnkie.com/sdk/library.lua"))()
-        _Junkie.service    = KEY_CONFIG.JUNKIE_SERVICE
-        _Junkie.identifier = KEY_CONFIG.JUNKIE_IDENTIFIER
-        _Junkie.provider   = KEY_CONFIG.JUNKIE_PROVIDER
-    end)
-    if not ok then
-        warn("[PHCzack] Failed to load Junkie SDK: " .. tostring(err))
-        _Junkie = nil
-        return false
-    end
-    return true
-end
-
-function KeySystem.JunkieGetLink()
-    if not _Junkie then return nil end
-    local ok, link = pcall(function()
-        return _Junkie.get_key_link()
-    end)
-    return ok and link or nil
-end
-
-function KeySystem.JunkieValidate(key)
-    if not _Junkie then return false, "Junkie SDK not loaded" end
-    local ok, result = pcall(function()
-        return _Junkie.check_key(key)
-    end)
-    if not ok then
-        return false, "Junkie check failed: " .. tostring(result)
-    end
-    -- Junkie.check_key returns true/false directly, or a table
-    if type(result) == "boolean" then
-        return result, result and "Key valid!" or "Invalid key"
-    end
-    if type(result) == "table" then
-        if result.valid then
-            return true, result.message or "Key valid!", result
-        end
-        return false, result.message or "Invalid key"
-    end
-    -- If result is truthy
-    if result then
-        return true, "Key valid!"
-    end
-    return false, "Invalid key"
-end
-
--- ============================================================
 -- KEY SYSTEM UI - Shows a key entry screen before loading lib
 -- ============================================================
 function KeySystem.ShowGate(onSuccess)
-    local isJunkie = (KEY_CONFIG.MODE == "junkie")
-    local junkieLink = nil
-
-    if isJunkie then
-        -- Load the Junkie SDK for work.ink key system
-        local loaded = KeySystem.LoadJunkie()
-        if loaded then
-            junkieLink = KeySystem.JunkieGetLink()
-        end
-    else
-        -- PHP mode: fetch provider links from your server
-        pcall(function() KeySystem.FetchProviders() end)
-    end
+    -- Fetch latest provider links from your admin panel
+    pcall(function() KeySystem.FetchProviders() end)
 
     local guiName = "PHCzack_KeyGate"
 
@@ -555,12 +468,9 @@ function KeySystem.ShowGate(onSuccess)
     local sepLbl = NewLabel(Card, "--- or get a key ---", 10, T.DIM, UDim2.new(0,24,0,216), UDim2.new(1,-48,0,18))
     sepLbl.TextXAlignment = Enum.TextXAlignment.Center
 
-    -- Get Key buttons
+    -- Get Key buttons (one per provider from your admin panel)
     local btnY = 242
-
-    if isJunkie then
-        -- JUNKIE MODE: single "Get Key via work.ink" button
-        local linkUrl = junkieLink or ("https://work.ink/" .. KEY_CONFIG.JUNKIE_IDENTIFIER)
+    for i, provider in ipairs(KEY_CONFIG.API_PROVIDERS) do
         local GetKeyBtn = Instance.new("TextButton")
         GetKeyBtn.Size             = UDim2.new(1,-48,0,34)
         GetKeyBtn.Position         = UDim2.new(0,24,0,btnY)
@@ -568,7 +478,7 @@ function KeySystem.ShowGate(onSuccess)
         GetKeyBtn.Font             = Enum.Font.Code
         GetKeyBtn.TextSize         = 12
         GetKeyBtn.TextColor3       = T.ACCENT2
-        GetKeyBtn.Text             = "[ GET KEY via WORK.INK ]"
+        GetKeyBtn.Text             = "[ GET KEY via " .. string.upper(provider.name) .. " ]"
         GetKeyBtn.BorderSizePixel  = 0
         GetKeyBtn.AutoButtonColor  = false
         GetKeyBtn.Parent           = Card
@@ -585,66 +495,20 @@ function KeySystem.ShowGate(onSuccess)
         GetKeyBtn.MouseButton1Click:Connect(function()
             pcall(function()
                 if setclipboard then
-                    setclipboard(linkUrl)
-                    StatusLbl.Text = "Link copied! Complete tasks in browser, get your key."
+                    setclipboard(provider.url)
+                    StatusLbl.Text = "Link copied! Complete tasks, then enter your key."
                     StatusLbl.TextColor3 = T.ACCENT2
                 end
             end)
         end)
+
         btnY = btnY + 40
-    else
-        -- PHP MODE: one button per provider from admin panel
-        for i, provider in ipairs(KEY_CONFIG.API_PROVIDERS) do
-            local GetKeyBtn = Instance.new("TextButton")
-            GetKeyBtn.Size             = UDim2.new(1,-48,0,34)
-            GetKeyBtn.Position         = UDim2.new(0,24,0,btnY)
-            GetKeyBtn.BackgroundColor3 = T.SURFACE
-            GetKeyBtn.Font             = Enum.Font.Code
-            GetKeyBtn.TextSize         = 12
-            GetKeyBtn.TextColor3       = T.ACCENT2
-            GetKeyBtn.Text             = "[ GET KEY via " .. string.upper(provider.name) .. " ]"
-            GetKeyBtn.BorderSizePixel  = 0
-            GetKeyBtn.AutoButtonColor  = false
-            GetKeyBtn.Parent           = Card
-            NewCorner(GetKeyBtn, 6)
-            NewStroke(GetKeyBtn, T.BORDER)
-
-            GetKeyBtn.MouseEnter:Connect(function()
-                Tw(GetKeyBtn, {BackgroundColor3 = Color3.fromRGB(20,30,50)})
-            end)
-            GetKeyBtn.MouseLeave:Connect(function()
-                Tw(GetKeyBtn, {BackgroundColor3 = T.SURFACE})
-            end)
-
-            GetKeyBtn.MouseButton1Click:Connect(function()
-                pcall(function()
-                    if setclipboard then
-                        setclipboard(provider.url)
-                        StatusLbl.Text = "Link copied! Complete tasks, then enter your key."
-                        StatusLbl.TextColor3 = T.ACCENT2
-                    end
-                end)
-            end)
-
-            btnY = btnY + 40
-        end
     end
 
     -- Footer
-    local footerLbl = NewLabel(Card,
-        isJunkie and "PHCzack + work.ink v1.0" or "PHCzack Key System v1.0",
-        9, Color3.fromRGB(40,50,65),
+    local footerLbl = NewLabel(Card, "PHCzack Key System v1.0", 9, Color3.fromRGB(40,50,65),
         UDim2.new(0,0,1,-20), UDim2.new(1,0,0,18))
     footerLbl.TextXAlignment = Enum.TextXAlignment.Center
-
-    -- Helper: validate key using the active mode
-    local function DoValidate(key)
-        if isJunkie then
-            return KeySystem.JunkieValidate(key)
-        else
-            return KeySystem.ValidateKey(key)
-        end
-    end
 
     -- Try loading saved key first
     local savedKey = KeySystem.LoadKey()
@@ -654,7 +518,7 @@ function KeySystem.ShowGate(onSuccess)
         StatusLbl.TextColor3 = T.ACCENT
 
         task.spawn(function()
-            local valid, msg, data = DoValidate(savedKey)
+            local valid, msg, data = KeySystem.ValidateKey(savedKey)
             if valid then
                 StatusLbl.Text = "Key valid! Loading..."
                 StatusLbl.TextColor3 = T.ACCENT
@@ -686,7 +550,7 @@ function KeySystem.ShowGate(onSuccess)
         StatusLbl.TextColor3 = T.DIM
 
         task.spawn(function()
-            local valid, msg, data = DoValidate(key)
+            local valid, msg, data = KeySystem.ValidateKey(key)
             if valid then
                 StatusLbl.Text = "Access granted!"
                 StatusLbl.TextColor3 = T.ACCENT
@@ -696,8 +560,8 @@ function KeySystem.ShowGate(onSuccess)
                 -- Save key locally
                 KeySystem.SaveKey(key)
 
-                -- Start heartbeat loop (PHP mode only)
-                if not isJunkie and KEY_CONFIG.HEARTBEAT_INTERVAL > 0 then
+                -- Start heartbeat loop
+                if KEY_CONFIG.HEARTBEAT_INTERVAL > 0 then
                     task.spawn(function()
                         while true do
                             task.wait(KEY_CONFIG.HEARTBEAT_INTERVAL)
@@ -1410,12 +1274,8 @@ end -- _CreateWindowInternal
 --   config.KeyRequired = false
 --
 -- Optional config fields:
---   config.Mode          — "junkie" or "php" (override KEY_CONFIG.MODE)
---   config.ApiUrl        — override KEY_CONFIG.API_URL  (PHP mode)
---   config.ApiSecret     — override KEY_CONFIG.API_SECRET (PHP mode)
---   config.JunkieService    — override JUNKIE_SERVICE
---   config.JunkieIdentifier — override JUNKIE_IDENTIFIER
---   config.JunkieProvider   — override JUNKIE_PROVIDER
+--   config.ApiUrl     — override KEY_CONFIG.API_URL
+--   config.ApiSecret  — override KEY_CONFIG.API_SECRET
 --   config.OnKeyValidated = function(key, data) end
 -- ============================================================
 function PHCzack:CreateWindow(config)
@@ -1428,12 +1288,8 @@ function PHCzack:CreateWindow(config)
     end
 
     -- Apply overrides before showing the gate
-    if config.Mode then KEY_CONFIG.MODE = config.Mode end
     if config.ApiUrl then KEY_CONFIG.API_URL = config.ApiUrl end
     if config.ApiSecret then KEY_CONFIG.API_SECRET = config.ApiSecret end
-    if config.JunkieService then KEY_CONFIG.JUNKIE_SERVICE = config.JunkieService end
-    if config.JunkieIdentifier then KEY_CONFIG.JUNKIE_IDENTIFIER = config.JunkieIdentifier end
-    if config.JunkieProvider then KEY_CONFIG.JUNKIE_PROVIDER = config.JunkieProvider end
 
     -- If already validated this session, skip the gate
     if _keyValidatedThisSession and _validatedKey then
