@@ -1319,6 +1319,7 @@ function PHCzack:CreateWindow(config)
 
     -- Show the key gate, then create window on success
     local windowRef = nil
+    local gateDone  = false
 
     KeySystem.ShowGate(function(key, data)
         _keyValidatedThisSession = true
@@ -1347,20 +1348,19 @@ function PHCzack:CreateWindow(config)
         end
 
         windowRef:Show()
+        gateDone = true
     end)
 
-    -- Return a proxy so scripts can chain calls (e.g. :AddTab)
-    -- before the key gate finishes. Calls queue up until window exists.
-    local proxy = {}
-    setmetatable(proxy, {
-        __index = function(_, k)
-            if windowRef then
-                return windowRef[k]
-            end
-            return function() end -- no-op until window is ready
-        end,
-    })
-    return proxy
+    -- YIELD: wait here until the key gate finishes.
+    -- task.wait() yields the coroutine so the UI stays responsive.
+    -- Once the user validates their key, gateDone becomes true and
+    -- we return the REAL window object — so AddTab/AddToggle etc.
+    -- all work correctly in the calling script.
+    while not gateDone do
+        task.wait(0.1)
+    end
+
+    return windowRef
 end
 
 -- CreateWindowWithKey is now just an alias (kept for backward compat)
