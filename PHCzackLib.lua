@@ -10,7 +10,7 @@
 -- //
 -- // This file MUST be used as shown above.
 -- // Do NOT paste this whole file into executor and run it directly.
--- // It only defines the library - your script calls it.
+-- // It only defines the library - your script calls
 
 -- ============================================================
 -- SERVICES
@@ -1869,7 +1869,7 @@ end -- _CreateWindowInternal
 -- ============================================================
 function PHCzack:CreateWindow(config)
     config = config or {}
-    local keyRequired = (config.KeyRequired ~= false) -- default: true
+    local keyRequired = false -- // TEMP: Key system disabled — set back to (config.KeyRequired ~= false) to re-enable
 
     -- If key check is disabled, go straight to window
     if not keyRequired then
