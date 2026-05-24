@@ -1,5 +1,8 @@
 -- // PHCzack UI Library v2.0 + Online Key System
--- // GitHub raw link usage:
+-- // Server-hosted usage (recommended):
+-- //   local PHCzack = loadstring(game:HttpGet("http://script.x10.mx/scripts.php?name=PHCzackLib"))()
+-- //
+-- // GitHub raw link usage (fallback):
 -- //   local PHCzack = loadstring(game:HttpGet("YOUR_RAW_URL"))()
 -- //
 -- // Studio ModuleScript usage:
@@ -26,10 +29,10 @@ local LocalPlayer      = Players.LocalPlayer
 -- ============================================================
 local KEY_CONFIG = {
     -- ================================================================
-    -- Your PHP admin panel at witchcraftpannel.x10.mx
+    -- Your PHP admin panel at script.x10.mx
     -- Manage keys & providers at: /admin.php?page=api_providers
     -- ================================================================
-    API_URL      = "http://witchcraftpannel.x10.mx/api.php",
+    API_URL      = "http://script.x10.mx/api.php",
     API_SECRET   = "PHCz_S3cR3t_K3y_2026!@#",
 
     -- Provider links are fetched dynamically from your admin panel.
@@ -58,7 +61,20 @@ local T = {
     TOG_OFF = Color3.fromRGB(40, 50, 65),
 }
 
-local W, H = 460, 520
+-- ── Mobile-aware sizing ─────────────────────────────────────
+local _IS_MOBILE = (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled)
+    or  (UserInputService.TouchEnabled and not UserInputService.MouseEnabled)
+
+local _VP        = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
+                   or Vector2.new(800, 600)
+
+-- On mobile: use a compact fixed size that fits most phone screens
+-- Width: ~88% of screen. Height: ~95% of screen (near full height)
+-- On PC: original 460×520
+local _mobileW = math.floor(math.min(_VP.X * 0.88, 340))
+local _mobileH = math.floor(math.min(_VP.Y * 0.95, 680))
+local W = _IS_MOBILE and _mobileW or 460
+local H = _IS_MOBILE and _mobileH or 520
 
 -- ============================================================
 -- HELPERS
@@ -124,33 +140,53 @@ local function NewPad(parent, px)
 end
 
 local function MakeDraggable(frame, handle)
-    local drag, inp, start, startPos
-    handle.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 then
-            drag = true
-            start = i.Position
-            startPos = frame.Position
-            i.Changed:Connect(function()
-                if i.UserInputState == Enum.UserInputState.End then
-                    drag = false
-                end
-            end)
+    -- Touch / mouse drag with proper mobile support.
+    -- IMPORTANT: on drag start we resolve the frame's ABSOLUTE pixel position
+    -- so that any Scale component in the initial UDim2 doesn't cause a jump.
+    local dragging   = false
+    local dragStart  = nil
+    local startAbsX  = 0
+    local startAbsY  = 0
+
+    local function onInputBegan(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1
+        or i.UserInputType == Enum.UserInputType.Touch then
+            dragging   = true
+            dragStart  = i.Position
+            -- Capture current absolute pixel position of the frame
+            startAbsX  = frame.AbsolutePosition.X
+            startAbsY  = frame.AbsolutePosition.Y
         end
-    end)
-    handle.InputChanged:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseMovement then
-            inp = i
+    end
+
+    local function onInputChanged(i)
+        if not dragging then return end
+        if i.UserInputType == Enum.UserInputType.MouseMovement
+        or i.UserInputType == Enum.UserInputType.Touch then
+            local d  = i.Position - dragStart
+            local vp = workspace.CurrentCamera.ViewportSize
+            local ax = frame.AbsoluteSize.X
+            local ay = frame.AbsoluteSize.Y
+            -- Use pure offset (Scale = 0) so position never jumps
+            local nx = math.clamp(startAbsX + d.X, 0, vp.X - ax)
+            local ny = math.clamp(startAbsY + d.Y, 0, vp.Y - ay * 0.3)
+            frame.Position = UDim2.new(0, nx, 0, ny)
         end
-    end)
+    end
+
+    local function onInputEnded(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1
+        or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end
+
+    handle.InputBegan:Connect(onInputBegan)
+    handle.InputChanged:Connect(onInputChanged)
     UserInputService.InputChanged:Connect(function(i)
-        if drag and i == inp then
-            local d = i.Position - start
-            frame.Position = UDim2.new(
-                startPos.X.Scale, startPos.X.Offset + d.X,
-                startPos.Y.Scale, startPos.Y.Offset + d.Y
-            )
-        end
+        if dragging then onInputChanged(i) end
     end)
+    UserInputService.InputEnded:Connect(onInputEnded)
 end
 
 -- ============================================================
@@ -324,9 +360,12 @@ function KeySystem.FetchProviders()
             if res and res.Body then
                 local data = HttpService:JSONDecode(res.Body)
                 if data and data.success then
-                    -- Store weekend_free flag from server
+                    -- Store server flags
                     if data.weekend_free ~= nil then
                         KEY_CONFIG._weekend_free = data.weekend_free
+                    end
+                    if data.no_key_mode ~= nil then
+                        KEY_CONFIG._no_key_mode = data.no_key_mode
                     end
                     if data.providers then
                         return data.providers
@@ -341,6 +380,9 @@ function KeySystem.FetchProviders()
         if data and data.success then
             if data.weekend_free ~= nil then
                 KEY_CONFIG._weekend_free = data.weekend_free
+            end
+            if data.no_key_mode ~= nil then
+                KEY_CONFIG._no_key_mode = data.no_key_mode
             end
             if data.providers then
                 return data.providers
@@ -388,7 +430,10 @@ function KeySystem.ShowGate(onSuccess)
     Overlay.Parent = ScreenGui
 
     -- Main card
-    local Card = NewFrame(ScreenGui, UDim2.new(0,380,0,0), UDim2.new(0.5,-190,0.5,-180), T.BG)
+    local _cardW   = _IS_MOBILE and math.floor(_VP.X * 0.92) or 380
+    local _cardX   = _IS_MOBILE and math.floor(_VP.X * 0.04) or -190
+    local _cardAnchorScale = _IS_MOBILE and 0 or 0.5
+    local Card = NewFrame(ScreenGui, UDim2.new(0,_cardW,0,0), UDim2.new(_cardAnchorScale,_cardX,0.5,-180), T.BG)
     Card.ClipsDescendants = true
     NewCorner(Card, 10)
     NewStroke(Card, T.ACCENT, 1.5)
@@ -396,7 +441,7 @@ function KeySystem.ShowGate(onSuccess)
     -- Animate open
     task.spawn(function()
         task.wait(0.05)
-        Tw(Card, {Size = UDim2.new(0,380,0,360)}, 0.35)
+        Tw(Card, {Size = UDim2.new(0,_cardW,0,360)}, 0.35)
     end)
 
     -- Header bar
@@ -427,7 +472,7 @@ function KeySystem.ShowGate(onSuccess)
         Tw(CloseBtn, {TextColor3 = T.DANGER})
     end)
     CloseBtn.MouseButton1Click:Connect(function()
-        Tw(Card, {Size = UDim2.new(0,380,0,0)}, 0.25)
+        Tw(Card, {Size = UDim2.new(0,_cardW,0,0)}, 0.25)
         task.wait(0.3)
         ScreenGui:Destroy()
     end)
@@ -533,7 +578,7 @@ function KeySystem.ShowGate(onSuccess)
             if valid then
                 StatusLbl.Text = "Key valid! Loading..."
                 StatusLbl.TextColor3 = T.ACCENT
-                Tw(Card, {Size = UDim2.new(0,380,0,0)}, 0.25)
+                Tw(Card, {Size = UDim2.new(0,_cardW,0,0)}, 0.25)
                 task.wait(0.3)
                 ScreenGui:Destroy()
                 if onSuccess then onSuccess(savedKey, data) end
@@ -581,7 +626,7 @@ function KeySystem.ShowGate(onSuccess)
                     end)
                 end
 
-                Tw(Card, {Size = UDim2.new(0,380,0,0)}, 0.25)
+                Tw(Card, {Size = UDim2.new(0,_cardW,0,0)}, 0.25)
                 task.wait(0.3)
                 ScreenGui:Destroy()
                 if onSuccess then onSuccess(key, data) end
@@ -655,7 +700,11 @@ function PHCzack:_CreateWindowInternal(config)
     ScreenGui.Parent          = GetParent()
 
     -- Main frame (starts at height 0 so Show() animates it open)
-    local Main = NewFrame(ScreenGui, UDim2.new(0,W,0,0), UDim2.new(0.5,-W/2,0.5,-H/2), T.BG)
+    -- Use pure pixel offset (Scale=0) so MakeDraggable's AbsolutePosition math is always clean
+    local _initX = math.floor((_VP.X - W) / 2)
+    local _initY = math.floor((_VP.Y - H) / 2)
+    local _startX = UDim2.new(0, _initX, 0, _initY)
+    local Main = NewFrame(ScreenGui, UDim2.new(0,W,0,0), _startX, T.BG)
     Main.ClipsDescendants = true
     NewCorner(Main, 8)
     NewStroke(Main, T.BORDER)
@@ -673,7 +722,7 @@ function PHCzack:_CreateWindowInternal(config)
         NewCorner(dot, 6)
     end
 
-    NewLabel(TitleBar, "  PHCzack // "..subtitle, 14, T.WHITE, UDim2.new(0,72,0,0), UDim2.new(1,-168,1,0))
+    NewLabel(TitleBar, "  PHCzack // "..subtitle, _IS_MOBILE and 12 or 14, T.WHITE, UDim2.new(0,72,0,0), UDim2.new(1,-168,1,0))
 
     -- Minimize
     local MinBtn = Instance.new("TextButton")
@@ -718,6 +767,90 @@ function PHCzack:_CreateWindowInternal(config)
 
     MakeDraggable(Main, TitleBar)
 
+    -- ── Mobile Hide/Show Floating Button ────────────────────
+    -- On mobile only: a small draggable pill button so the user can
+    -- hide/show the window. Uses a drag-distance threshold so dragging
+    -- never accidentally triggers a hide/show toggle.
+    local MobileToggleBtn = nil
+    if _IS_MOBILE then
+        -- Place it at a fixed pixel offset from top-left so position math is simple
+        local _btnW, _btnH = 62, 28
+        local _btnStartX   = 8
+        local _btnStartY   = math.floor(_VP.Y - 48)  -- near bottom of screen
+
+        MobileToggleBtn = Instance.new("TextButton")
+        MobileToggleBtn.Size             = UDim2.new(0, _btnW, 0, _btnH)
+        MobileToggleBtn.Position         = UDim2.new(0, _btnStartX, 0, _btnStartY)
+        MobileToggleBtn.BackgroundColor3 = T.SURFACE
+        MobileToggleBtn.Font             = Enum.Font.Code
+        MobileToggleBtn.TextSize         = 11
+        MobileToggleBtn.TextColor3       = T.ACCENT
+        MobileToggleBtn.Text             = "[ UI ]"
+        MobileToggleBtn.BorderSizePixel  = 0
+        MobileToggleBtn.AutoButtonColor  = false
+        MobileToggleBtn.ZIndex           = 20
+        MobileToggleBtn.Parent           = ScreenGui
+        NewCorner(MobileToggleBtn, 7)
+        NewStroke(MobileToggleBtn, T.ACCENT, 1.5)
+
+        -- Custom drag for the toggle button — uses pure offset position
+        -- and tracks drag distance so we can distinguish tap vs drag
+        local _tbDragging  = false
+        local _tbDragStart = nil
+        local _tbBtnStart  = nil
+        local _tbMoved     = false   -- true if finger moved enough to count as a drag
+
+        MobileToggleBtn.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.Touch
+            or i.UserInputType == Enum.UserInputType.MouseButton1 then
+                _tbDragging  = true
+                _tbMoved     = false
+                _tbDragStart = i.Position
+                _tbBtnStart  = MobileToggleBtn.Position
+            end
+        end)
+
+        UserInputService.InputChanged:Connect(function(i)
+            if not _tbDragging then return end
+            if i.UserInputType == Enum.UserInputType.Touch
+            or i.UserInputType == Enum.UserInputType.MouseMovement then
+                local dx = i.Position.X - _tbDragStart.X
+                local dy = i.Position.Y - _tbDragStart.Y
+                -- Only move if past a 6px threshold (prevents jitter toggling)
+                if math.abs(dx) > 6 or math.abs(dy) > 6 then
+                    _tbMoved = true
+                    local vp  = workspace.CurrentCamera.ViewportSize
+                    local nx  = math.clamp(_tbBtnStart.X.Offset + dx, 0, vp.X - _btnW)
+                    local ny  = math.clamp(_tbBtnStart.Y.Offset + dy, 0, vp.Y - _btnH)
+                    MobileToggleBtn.Position = UDim2.new(0, nx, 0, ny)
+                end
+            end
+        end)
+
+        UserInputService.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.Touch
+            or i.UserInputType == Enum.UserInputType.MouseButton1 then
+                _tbDragging = false
+            end
+        end)
+
+        local _guiShown = true
+        MobileToggleBtn.MouseButton1Click:Connect(function()
+            -- If the finger dragged, don't toggle — it was a drag not a tap
+            if _tbMoved then _tbMoved = false ; return end
+            _guiShown = not _guiShown
+            if _guiShown then
+                Main.Visible = true
+                Tw(Main, {Size = UDim2.new(0,W,0,H)}, 0.2)
+                MobileToggleBtn.TextColor3 = T.ACCENT
+            else
+                Tw(Main, {Size = UDim2.new(0,W,0,0)}, 0.18)
+                task.delay(0.2, function() Main.Visible = false end)
+                MobileToggleBtn.TextColor3 = T.DIM
+            end
+        end)
+    end
+
     -- ── Status Bar ──────────────────────────────────────────
     local StatusBar = NewFrame(Main, UDim2.new(1,0,0,26), UDim2.new(0,0,0,42), Color3.fromRGB(13,16,24))
     local SDot = NewFrame(StatusBar, UDim2.new(0,7,0,7), UDim2.new(0,10,0.5,-3), T.ACCENT)
@@ -729,10 +862,26 @@ function PHCzack:_CreateWindowInternal(config)
         end
     end)
     local sess = string.format("%X", math.floor(tick()) % 0xFFFFFF)
-    NewLabel(StatusBar, "[SYS] CONNECTED  |  SESSION: "..sess, 11, T.ACCENT, UDim2.new(0,22,0,0), UDim2.new(1,-22,1,0))
+    NewLabel(StatusBar, "[SYS] CONNECTED  |  SESSION: "..sess, _IS_MOBILE and 9 or 11, T.ACCENT, UDim2.new(0,22,0,0), UDim2.new(1,-22,1,0))
 
     -- ── Tab Bar ─────────────────────────────────────────────
-    local TabBar = NewFrame(Main, UDim2.new(1,0,0,32), UDim2.new(0,0,0,68), T.BG)
+    -- On mobile: ScrollingFrame so many tabs can be swiped horizontally
+    local TabBar
+    if _IS_MOBILE then
+        TabBar = Instance.new("ScrollingFrame")
+        TabBar.Size                 = UDim2.new(1,0,0,36)
+        TabBar.Position             = UDim2.new(0,0,0,68)
+        TabBar.BackgroundColor3     = T.BG
+        TabBar.BorderSizePixel      = 0
+        TabBar.ScrollBarThickness   = 0  -- hidden scrollbar (swipe to scroll)
+        TabBar.ScrollingDirection   = Enum.ScrollingDirection.X
+        TabBar.CanvasSize           = UDim2.new(0,0,0,0)
+        TabBar.ClipsDescendants     = true
+        TabBar.Parent               = Main
+    else
+        TabBar = NewFrame(Main, UDim2.new(1,0,0,36), UDim2.new(0,0,0,68), T.BG)
+        TabBar.ClipsDescendants = true
+    end
     local TL = Instance.new("UIListLayout")
     TL.Padding = UDim.new(0,4)
     TL.FillDirection = Enum.FillDirection.Horizontal
@@ -744,7 +893,7 @@ function PHCzack:_CreateWindowInternal(config)
     TP.Parent = TabBar
 
     -- ── Content Host ────────────────────────────────────────
-    local CY = 68 + 32 + 6
+    local CY = 68 + 36 + 6
     local ContentHost = NewFrame(Main, UDim2.new(1,-20,0,H-CY-28), UDim2.new(0,10,0,CY), Color3.new(0,0,0))
     ContentHost.BackgroundTransparency = 1
 
@@ -758,6 +907,30 @@ function PHCzack:_CreateWindowInternal(config)
     -- ============================================================
     local Window   = {}
     local AllTabs  = {}
+    local AllTabBtns = {}
+
+    -- Dynamically resize tab buttons so any number of tabs fits the bar
+    local function ResizeTabBtns()
+        local n = #AllTabBtns
+        if n == 0 then return end
+        if _IS_MOBILE then
+            -- On mobile: fixed width per tab, tabs scroll horizontally
+            local btnW = math.max(56, math.floor((W - 12) / math.min(n, 5)))
+            for _, btn in ipairs(AllTabBtns) do
+                btn.Size = UDim2.new(0, btnW, 1, -6)
+            end
+            -- Update scrollable canvas width
+            local totalW = btnW * n + 4 * (n - 1) + 12
+            TabBar.CanvasSize = UDim2.new(0, totalW, 0, 0)
+        else
+            local available = W - 12            -- left + right padding
+            local totalGap  = 4 * (n - 1)      -- gaps between buttons
+            local btnW      = math.floor((available - totalGap) / n)
+            for _, btn in ipairs(AllTabBtns) do
+                btn.Size = UDim2.new(0, btnW, 1, -6)
+            end
+        end
+    end
 
     function Window:Show()
         -- Small wait ensures ScreenGui is registered before tweening
@@ -787,7 +960,7 @@ function PHCzack:_CreateWindowInternal(config)
         Btn.Size             = UDim2.new(0,85,1,-6)
         Btn.BackgroundColor3 = T.SURFACE
         Btn.Font             = Enum.Font.Code
-        Btn.TextSize         = 12
+        Btn.TextSize         = _IS_MOBILE and 10 or 12
         Btn.TextColor3       = T.DIM
         Btn.Text             = name
         Btn.BorderSizePixel  = 0
@@ -796,11 +969,15 @@ function PHCzack:_CreateWindowInternal(config)
         NewCorner(Btn, 5)
         NewStroke(Btn, T.BORDER)
 
+        -- Auto-size all tab buttons to fit the bar
+        table.insert(AllTabBtns, Btn)
+        ResizeTabBtns()
+
         local Scroll = Instance.new("ScrollingFrame")
         Scroll.Size                  = UDim2.new(1,0,1,0)
         Scroll.BackgroundTransparency= 1
         Scroll.BorderSizePixel       = 0
-        Scroll.ScrollBarThickness    = 3
+        Scroll.ScrollBarThickness    = _IS_MOBILE and 6 or 3  -- thicker scrollbar for fingers
         Scroll.ScrollBarImageColor3  = T.ACCENT
         Scroll.CanvasSize            = UDim2.new(0,0,0,0)
         Scroll.Visible               = false
@@ -830,10 +1007,11 @@ function PHCzack:_CreateWindowInternal(config)
 
         local function MakeRow(labelTxt, h)
             Tab._count = Tab._count + 1
-            local row = NewFrame(Scroll, UDim2.new(1,-6,0,h or 40), nil, T.SURFACE)
+            local rowH = h or (_IS_MOBILE and 40 or 40)
+            local row = NewFrame(Scroll, UDim2.new(1,-6,0,rowH), nil, T.SURFACE)
             row.LayoutOrder = Tab._count
             NewCorner(row, 6) ; NewStroke(row, T.BORDER)
-            local lbl = NewLabel(row, labelTxt, 13, T.TEXT, UDim2.new(0,10,0,0), UDim2.new(0.6,-10,1,0))
+            local lbl = NewLabel(row, labelTxt, _IS_MOBILE and 12 or 13, T.TEXT, UDim2.new(0,10,0,0), UDim2.new(0.6,-10,1,0))
             return row, lbl
         end
 
@@ -1100,43 +1278,75 @@ function PHCzack:_CreateWindowInternal(config)
             Tab._count = Tab._count + 1
             local val  = default or min
 
-            local row = NewFrame(Scroll, UDim2.new(1,-6,0,58), nil, T.SURFACE)
+            -- Taller row on mobile so the track + thumb are easy to touch
+            local rowH = _IS_MOBILE and 64 or 58
+            local row = NewFrame(Scroll, UDim2.new(1,-6,0,rowH), nil, T.SURFACE)
             row.LayoutOrder = Tab._count
             NewCorner(row, 6) ; NewStroke(row, T.BORDER)
 
-            local Top = NewFrame(row, UDim2.new(1,0,0,40), nil, Color3.new(0,0,0))
+            local Top = NewFrame(row, UDim2.new(1,0,0,36), nil, Color3.new(0,0,0))
             Top.BackgroundTransparency = 1
-            NewLabel(Top, labelTxt, 13, T.TEXT, UDim2.new(0,10,0,0), UDim2.new(0.65,0,1,0))
-            local ValLbl = NewLabel(Top, tostring(val), 13, T.ACCENT, UDim2.new(0.65,0,0,0), UDim2.new(0.35,-10,1,0))
+            NewLabel(Top, labelTxt, _IS_MOBILE and 12 or 13, T.TEXT, UDim2.new(0,10,0,0), UDim2.new(0.65,0,1,0))
+            local ValLbl = NewLabel(Top, tostring(val), _IS_MOBILE and 12 or 13, T.ACCENT, UDim2.new(0.65,0,0,0), UDim2.new(0.35,-10,1,0))
             ValLbl.TextXAlignment = Enum.TextXAlignment.Right
 
-            local TBG = NewFrame(row, UDim2.new(1,-20,0,5), UDim2.new(0,10,0,46), T.INPUT)
-            NewCorner(TBG, 3)
+            -- Track background — taller on mobile so finger can hit it easily
+            local trackH  = _IS_MOBILE and 8 or 5
+            local trackY  = _IS_MOBILE and 44 or 44
+            local TBG = NewFrame(row, UDim2.new(1,-20,0,trackH), UDim2.new(0,10,0,trackY), T.INPUT)
+            NewCorner(TBG, math.floor(trackH/2))
             local r0   = (val-min)/(max-min)
-            local Fill = NewFrame(TBG, UDim2.new(r0,0,1,0), nil, T.ACCENT) ; NewCorner(Fill, 3)
-            local Thumb= NewFrame(TBG, UDim2.new(0,13,0,13), UDim2.new(r0,-6,0.5,-6), T.WHITE) ; NewCorner(Thumb, 7)
+            local Fill = NewFrame(TBG, UDim2.new(r0,0,1,0), nil, T.ACCENT)
+            NewCorner(Fill, math.floor(trackH/2))
+            local thumbSz = _IS_MOBILE and 18 or 13
+            local Thumb = NewFrame(TBG, UDim2.new(0,thumbSz,0,thumbSz),
+                UDim2.new(r0, -math.floor(thumbSz/2), 0.5, -math.floor(thumbSz/2)), T.WHITE)
+            NewCorner(Thumb, math.floor(thumbSz/2))
 
             local sliding = false
+
             local function Update(xPos)
-                local r = math.clamp((xPos - TBG.AbsolutePosition.X) / TBG.AbsoluteSize.X, 0, 1)
-                val = math.round(min + (max-min)*r)
-                Fill.Size      = UDim2.new(r, 0, 1, 0)
-                Thumb.Position = UDim2.new(r, -6, 0.5, -6)
+                local rel = math.clamp((xPos - TBG.AbsolutePosition.X) / TBG.AbsoluteSize.X, 0, 1)
+                val = math.round(min + (max - min) * rel)
+                Fill.Size      = UDim2.new(rel, 0, 1, 0)
+                Thumb.Position = UDim2.new(rel, -math.floor(thumbSz/2), 0.5, -math.floor(thumbSz/2))
                 ValLbl.Text    = tostring(val)
                 if callback then pcall(callback, val) end
             end
 
-            TBG.InputBegan:Connect(function(i)
-                if i.UserInputType == Enum.UserInputType.MouseButton1 then
-                    sliding = true ; Update(i.Position.X)
+            -- Invisible hit area that covers full row width for easy touch
+            local HitArea = Instance.new("TextButton")
+            HitArea.Size                 = UDim2.new(1, -20, 0, _IS_MOBILE and 36 or 24)
+            HitArea.Position             = UDim2.new(0, 10, 0, trackY - (_IS_MOBILE and 14 or 10))
+            HitArea.BackgroundTransparency = 1
+            HitArea.Text                 = ""
+            HitArea.BorderSizePixel      = 0
+            HitArea.ZIndex               = 5
+            HitArea.Parent               = row
+
+            -- Begin: mouse OR touch
+            HitArea.InputBegan:Connect(function(i)
+                if i.UserInputType == Enum.UserInputType.MouseButton1
+                or i.UserInputType == Enum.UserInputType.Touch then
+                    sliding = true
+                    Update(i.Position.X)
                 end
             end)
-            UserInputService.InputEnded:Connect(function(i)
-                if i.UserInputType == Enum.UserInputType.MouseButton1 then sliding = false end
-            end)
+
+            -- Global move: mouse OR touch
             UserInputService.InputChanged:Connect(function(i)
-                if sliding and i.UserInputType == Enum.UserInputType.MouseMovement then
+                if not sliding then return end
+                if i.UserInputType == Enum.UserInputType.MouseMovement
+                or i.UserInputType == Enum.UserInputType.Touch then
                     Update(i.Position.X)
+                end
+            end)
+
+            -- End: mouse OR touch
+            UserInputService.InputEnded:Connect(function(i)
+                if i.UserInputType == Enum.UserInputType.MouseButton1
+                or i.UserInputType == Enum.UserInputType.Touch then
+                    sliding = false
                 end
             end)
 
@@ -1144,9 +1354,9 @@ function PHCzack:_CreateWindowInternal(config)
                 Get = function() return val end,
                 Set = function(v)
                     val = math.clamp(v, min, max)
-                    local r = (val-min)/(max-min)
-                    Fill.Size      = UDim2.new(r,0,1,0)
-                    Thumb.Position = UDim2.new(r,-6,0.5,-6)
+                    local r = (val - min) / (max - min)
+                    Fill.Size      = UDim2.new(r, 0, 1, 0)
+                    Thumb.Position = UDim2.new(r, -math.floor(thumbSz/2), 0.5, -math.floor(thumbSz/2))
                     ValLbl.Text    = tostring(val)
                 end,
             }
@@ -1215,6 +1425,9 @@ function PHCzack:_CreateWindowInternal(config)
             return { Get = function() return IBox.Text end, Set = function(t) IBox.Text = t end }
         end
 
+        -- Alias: AddTextbox -> AddTextInput (convenience)
+        Tab.AddTextbox = Tab.AddTextInput
+
         -- ── FPS Monitor ─────────────────────────────────────
         function Tab:AddShowFPS()
             local row = MakeRow("  FPS MONITOR")
@@ -1255,6 +1468,371 @@ function PHCzack:_CreateWindowInternal(config)
                 NewFrame(sep, UDim2.new(0.44,0,0,1), UDim2.new(0.56,0,0.5,0), T.BORDER)
             end
         end
+
+        -- ── Category (collapsible section) ──────────────────
+        -- Works like SpeedHub: a header button you tap/click to
+        -- expand or collapse all items inside it.
+        --
+        -- Usage:
+        --   local Cat = Tab:AddCategory("AUTO HARVEST")
+        --   Cat:AddToggle(...)
+        --   Cat:AddButton(...)
+        --   -- Cat supports all the same methods as Tab
+        function Tab:AddCategory(labelTxt, startOpen)
+            Tab._count = Tab._count + 1
+
+            -- ── Header button ────────────────────────────────
+            local headerH = _IS_MOBILE and 38 or 34
+            local Header = Instance.new("TextButton")
+            Header.Size             = UDim2.new(1,-6,0,headerH)
+            Header.BackgroundColor3 = Color3.fromRGB(14, 18, 28)
+            Header.Font             = Enum.Font.Code
+            Header.TextSize         = _IS_MOBILE and 12 or 12
+            Header.TextColor3       = T.ACCENT
+            Header.Text             = ""
+            Header.BorderSizePixel  = 0
+            Header.AutoButtonColor  = false
+            Header.LayoutOrder      = Tab._count
+            Header.Parent           = Scroll
+            NewCorner(Header, 6)
+            NewStroke(Header, T.ACCENT, 1.2)
+
+            -- Left accent bar
+            local AccBar = NewFrame(Header, UDim2.new(0,3,0,headerH-10), UDim2.new(0,8,0.5,-(headerH-10)/2), T.ACCENT)
+            NewCorner(AccBar, 2)
+
+            -- Label
+            local HLbl = NewLabel(Header, "  " .. (labelTxt or "CATEGORY"), _IS_MOBILE and 12 or 12,
+                T.ACCENT, UDim2.new(0,16,0,0), UDim2.new(1,-50,1,0))
+            HLbl.Font = Enum.Font.Code
+
+            -- Arrow indicator  ▼ / ▶
+            local Arrow = NewLabel(Header, "▼", _IS_MOBILE and 12 or 11,
+                T.DIM, UDim2.new(1,-28,0,0), UDim2.new(0,22,1,0))
+            Arrow.TextXAlignment = Enum.TextXAlignment.Center
+
+            -- ── Container frame for child items ─────────────
+            -- Height starts at 0 (collapsed) or auto (open)
+            Tab._count = Tab._count + 1
+            local Container = NewFrame(Scroll, UDim2.new(1,-6,0,0), nil, Color3.new(0,0,0))
+            Container.BackgroundTransparency = 1
+            Container.ClipsDescendants       = true
+            Container.LayoutOrder            = Tab._count
+            Container.Parent                 = Scroll  -- already set via NewFrame parent arg
+
+            local CList = NewList(Container, 4)
+            local CPad  = Instance.new("UIPadding")
+            CPad.PaddingLeft   = UDim.new(0,10)
+            CPad.PaddingRight  = UDim.new(0,0)
+            CPad.PaddingTop    = UDim.new(0,4)
+            CPad.PaddingBottom = UDim.new(0,4)
+            CPad.Parent        = Container
+
+            -- Track open/closed state and content height
+            local isOpen       = (startOpen == true)
+            local contentH     = 0
+
+            -- Recompute container height when children change
+            CList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+                contentH = CList.AbsoluteContentSize.Y + 8
+                if isOpen then
+                    Container.Size = UDim2.new(1,-6,0, contentH)
+                end
+            end)
+
+            local function SetOpen(open)
+                isOpen = open
+                Arrow.Text      = open and "▼" or "▶"
+                Arrow.TextColor3 = open and T.ACCENT or T.DIM
+                Tw(Container, {Size = UDim2.new(1,-6,0, open and contentH or 0)}, 0.18)
+            end
+
+            -- Start in correct state without animation
+            if isOpen then
+                Container.Size = UDim2.new(1,-6,0, contentH)
+            end
+
+            Header.MouseButton1Click:Connect(function()
+                SetOpen(not isOpen)
+            end)
+
+            -- ── Category object — mirrors Tab API ────────────
+            local Cat = {_count = 0}
+
+            -- MakeRow for category children (narrower due to left padding)
+            local function CatRow(txt, h)
+                Cat._count = Cat._count + 1
+                local rowH = h or (_IS_MOBILE and 40 or 38)
+                local row = NewFrame(Container, UDim2.new(1,0,0,rowH), nil, Color3.fromRGB(20,25,38))
+                row.LayoutOrder = Cat._count
+                NewCorner(row, 5)
+                NewStroke(row, Color3.fromRGB(35,45,65))
+                local lbl = NewLabel(row, txt, _IS_MOBILE and 12 or 12, T.TEXT,
+                    UDim2.new(0,10,0,0), UDim2.new(0.6,-10,1,0))
+                return row, lbl
+            end
+
+            -- ── Mirror all Tab methods onto Cat ─────────────
+            function Cat:AddToggle(labelTxt, default, callback)
+                local row   = CatRow(labelTxt)
+                local state = (default == true)
+                local Track = NewFrame(row, UDim2.new(0,44,0,22), UDim2.new(1,-54,0.5,-11), state and T.TOG_ON or T.TOG_OFF)
+                NewCorner(Track, 11)
+                local Knob = NewFrame(Track, UDim2.new(0,18,0,18), state and UDim2.new(0,24,0.5,-9) or UDim2.new(0,2,0.5,-9), T.WHITE)
+                NewCorner(Knob, 9)
+                local HB = Instance.new("TextButton")
+                HB.Size = UDim2.new(1,0,1,0) ; HB.BackgroundTransparency = 1 ; HB.Text = "" ; HB.Parent = row
+                HB.MouseButton1Click:Connect(function()
+                    state = not state
+                    Tw(Track, {BackgroundColor3 = state and T.TOG_ON or T.TOG_OFF})
+                    Tw(Knob,  {Position = state and UDim2.new(0,24,0.5,-9) or UDim2.new(0,2,0.5,-9)})
+                    if callback then pcall(callback, state) end
+                end)
+                return { Get = function() return state end,
+                    Set = function(v) state = v ; Track.BackgroundColor3 = v and T.TOG_ON or T.TOG_OFF
+                        Knob.Position = v and UDim2.new(0,24,0.5,-9) or UDim2.new(0,2,0.5,-9) end }
+            end
+
+            function Cat:AddButton(labelTxt, callback, style)
+                Cat._count = Cat._count + 1
+                local accent = (style == "accent")
+                local Btn = Instance.new("TextButton")
+                Btn.Size             = UDim2.new(1,0,0, _IS_MOBILE and 38 or 36)
+                Btn.BackgroundColor3 = accent and T.ACCENT or Color3.fromRGB(20,25,38)
+                Btn.Font             = Enum.Font.Code
+                Btn.TextSize         = _IS_MOBILE and 12 or 12
+                Btn.TextColor3       = accent and T.BG or T.TEXT
+                Btn.Text             = labelTxt
+                Btn.BorderSizePixel  = 0
+                Btn.AutoButtonColor  = false
+                Btn.LayoutOrder      = Cat._count
+                Btn.Parent           = Container
+                NewCorner(Btn, 5)
+                NewStroke(Btn, accent and T.ACCENT or Color3.fromRGB(35,45,65))
+                Btn.MouseButton1Click:Connect(function()
+                    Tw(Btn, {BackgroundColor3 = T.ACCENT2}, 0.08)
+                    task.delay(0.12, function() Tw(Btn, {BackgroundColor3 = accent and T.ACCENT or Color3.fromRGB(20,25,38)}) end)
+                    if callback then pcall(callback) end
+                end)
+            end
+
+            function Cat:AddSlider(labelTxt, min, max, default, callback)
+                local val  = default or min
+                local rowH = _IS_MOBILE and 64 or 58
+                local row = NewFrame(Container, UDim2.new(1,0,0,rowH), nil, Color3.fromRGB(20,25,38))
+                Cat._count = Cat._count + 1
+                row.LayoutOrder = Cat._count
+                NewCorner(row, 5) ; NewStroke(row, Color3.fromRGB(35,45,65))
+
+                local Top = NewFrame(row, UDim2.new(1,0,0,36), nil, Color3.new(0,0,0))
+                Top.BackgroundTransparency = 1
+                NewLabel(Top, labelTxt, _IS_MOBILE and 12 or 12, T.TEXT, UDim2.new(0,10,0,0), UDim2.new(0.65,0,1,0))
+                local ValLbl = NewLabel(Top, tostring(val), _IS_MOBILE and 12 or 12, T.ACCENT, UDim2.new(0.65,0,0,0), UDim2.new(0.35,-10,1,0))
+                ValLbl.TextXAlignment = Enum.TextXAlignment.Right
+
+                local trackH = _IS_MOBILE and 8 or 5
+                local trackY = 44
+                local TBG = NewFrame(row, UDim2.new(1,-20,0,trackH), UDim2.new(0,10,0,trackY), T.INPUT)
+                NewCorner(TBG, math.floor(trackH/2))
+                local r0   = (val-min)/(max-min)
+                local Fill = NewFrame(TBG, UDim2.new(r0,0,1,0), nil, T.ACCENT) ; NewCorner(Fill, math.floor(trackH/2))
+                local thumbSz = _IS_MOBILE and 18 or 13
+                local Thumb = NewFrame(TBG, UDim2.new(0,thumbSz,0,thumbSz),
+                    UDim2.new(r0,-math.floor(thumbSz/2),0.5,-math.floor(thumbSz/2)), T.WHITE)
+                NewCorner(Thumb, math.floor(thumbSz/2))
+
+                local sliding = false
+                local function Update(xPos)
+                    local rel = math.clamp((xPos - TBG.AbsolutePosition.X) / TBG.AbsoluteSize.X, 0, 1)
+                    val = math.round(min + (max-min)*rel)
+                    Fill.Size      = UDim2.new(rel,0,1,0)
+                    Thumb.Position = UDim2.new(rel,-math.floor(thumbSz/2),0.5,-math.floor(thumbSz/2))
+                    ValLbl.Text    = tostring(val)
+                    if callback then pcall(callback, val) end
+                end
+
+                local HitArea = Instance.new("TextButton")
+                HitArea.Size = UDim2.new(1,-20,0,_IS_MOBILE and 36 or 24)
+                HitArea.Position = UDim2.new(0,10,0,trackY-(_IS_MOBILE and 14 or 10))
+                HitArea.BackgroundTransparency = 1 ; HitArea.Text = "" ; HitArea.BorderSizePixel = 0
+                HitArea.ZIndex = 5 ; HitArea.Parent = row
+                HitArea.InputBegan:Connect(function(i)
+                    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                        sliding = true ; Update(i.Position.X)
+                    end
+                end)
+                UserInputService.InputChanged:Connect(function(i)
+                    if not sliding then return end
+                    if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+                        Update(i.Position.X)
+                    end
+                end)
+                UserInputService.InputEnded:Connect(function(i)
+                    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                        sliding = false
+                    end
+                end)
+                return { Get = function() return val end,
+                    Set = function(v)
+                        val = math.clamp(v,min,max) ; local r=(val-min)/(max-min)
+                        Fill.Size=UDim2.new(r,0,1,0) ; Thumb.Position=UDim2.new(r,-math.floor(thumbSz/2),0.5,-math.floor(thumbSz/2))
+                        ValLbl.Text=tostring(val)
+                    end }
+            end
+
+            function Cat:AddDropdown(labelTxt, options, callback)
+                local selected = options[1] or ""
+                local Header2 = NewFrame(Container, UDim2.new(1,0,0,_IS_MOBILE and 42 or 38), nil, Color3.fromRGB(20,25,38))
+                Cat._count = Cat._count + 1 ; Header2.LayoutOrder = Cat._count
+                NewCorner(Header2, 5) ; NewStroke(Header2, Color3.fromRGB(35,45,65))
+                NewLabel(Header2, labelTxt, _IS_MOBILE and 12 or 12, T.TEXT, UDim2.new(0,10,0,0), UDim2.new(0.5,0,1,0))
+                local ValBtn = Instance.new("TextButton")
+                ValBtn.Size=UDim2.new(0,130,0,26) ; ValBtn.Position=UDim2.new(1,-138,0.5,-13)
+                ValBtn.BackgroundColor3=T.INPUT ; ValBtn.Font=Enum.Font.Code ; ValBtn.TextSize=11
+                ValBtn.TextColor3=T.ACCENT ; ValBtn.Text=selected.." v" ; ValBtn.BorderSizePixel=0
+                ValBtn.AutoButtonColor=false ; ValBtn.Parent=Header2 ; NewCorner(ValBtn,5) ; NewStroke(ValBtn,T.BORDER)
+                Cat._count = Cat._count + 1
+                local Panel = NewFrame(Container, UDim2.new(1,0,0,#options*30+8), nil, T.INPUT)
+                Panel.LayoutOrder = Cat._count ; Panel.Visible = false
+                NewCorner(Panel,5) ; NewStroke(Panel,T.ACCENT) ; NewPad(Panel,4) ; NewList(Panel,3)
+                for _, opt in ipairs(options) do
+                    local OBtn = Instance.new("TextButton")
+                    OBtn.Size=UDim2.new(1,0,0,26) ; OBtn.BackgroundColor3=T.SURFACE ; OBtn.Font=Enum.Font.Code
+                    OBtn.TextSize=11 ; OBtn.TextColor3=(opt==selected) and T.ACCENT or T.TEXT
+                    OBtn.Text="  "..opt ; OBtn.TextXAlignment=Enum.TextXAlignment.Left
+                    OBtn.BorderSizePixel=0 ; OBtn.AutoButtonColor=false ; OBtn.Parent=Panel ; NewCorner(OBtn,4)
+                    OBtn.MouseButton1Click:Connect(function()
+                        selected=opt ; ValBtn.Text=opt.." v" ; Panel.Visible=false
+                        if callback then pcall(callback,selected) end
+                    end)
+                end
+                local open=false
+                ValBtn.MouseButton1Click:Connect(function() open=not open ; Panel.Visible=open end)
+                return { Get = function() return selected end }
+            end
+
+            function Cat:AddMultiDropdown(labelTxt, options, callback)
+                local selected = {}
+
+                local Header2 = NewFrame(Container, UDim2.new(1,0,0,_IS_MOBILE and 42 or 38), nil, Color3.fromRGB(20,25,38))
+                Cat._count = Cat._count + 1 ; Header2.LayoutOrder = Cat._count
+                NewCorner(Header2, 5) ; NewStroke(Header2, Color3.fromRGB(35,45,65))
+                NewLabel(Header2, labelTxt, _IS_MOBILE and 12 or 12, T.TEXT, UDim2.new(0,10,0,0), UDim2.new(0.5,0,1,0))
+
+                local ValBtn = Instance.new("TextButton")
+                ValBtn.Size=UDim2.new(0,130,0,26) ; ValBtn.Position=UDim2.new(1,-138,0.5,-13)
+                ValBtn.BackgroundColor3=T.INPUT ; ValBtn.Font=Enum.Font.Code ; ValBtn.TextSize=10
+                ValBtn.TextColor3=T.ACCENT ; ValBtn.Text="none v" ; ValBtn.BorderSizePixel=0
+                ValBtn.AutoButtonColor=false ; ValBtn.TextTruncate=Enum.TextTruncate.AtEnd
+                ValBtn.Parent=Header2 ; NewCorner(ValBtn,5) ; NewStroke(ValBtn,T.BORDER)
+
+                Cat._count = Cat._count + 1
+                local Panel = NewFrame(Container, UDim2.new(1,0,0,#options*30+8), nil, T.INPUT)
+                Panel.LayoutOrder = Cat._count ; Panel.Visible = false
+                NewCorner(Panel,5) ; NewStroke(Panel,T.ACCENT) ; NewPad(Panel,4) ; NewList(Panel,3)
+
+                local rowObjs = {}
+                local function RefreshSummary()
+                    local list = {}
+                    for _, opt in ipairs(options) do if selected[opt] then table.insert(list, opt) end end
+                    ValBtn.Text = (#list == 0) and "none v" or (table.concat(list,", ").." v")
+                    if callback then pcall(callback, list) end
+                end
+
+                for _, opt in ipairs(options) do
+                    local ORow = Instance.new("TextButton")
+                    ORow.Size=UDim2.new(1,0,0,26) ; ORow.BackgroundColor3=T.SURFACE ; ORow.Font=Enum.Font.Code
+                    ORow.TextSize=11 ; ORow.TextColor3=T.TEXT ; ORow.Text="  "..opt
+                    ORow.TextXAlignment=Enum.TextXAlignment.Left ; ORow.BorderSizePixel=0
+                    ORow.AutoButtonColor=false ; ORow.Parent=Panel ; NewCorner(ORow,4)
+                    local chk = NewLabel(ORow,"",11,T.ACCENT,UDim2.new(1,-20,0,0),UDim2.new(0,18,1,0))
+                    chk.TextXAlignment=Enum.TextXAlignment.Center
+                    rowObjs[opt] = {btn=ORow, chk=chk}
+                    ORow.MouseButton1Click:Connect(function()
+                        selected[opt] = not selected[opt]
+                        chk.Text = selected[opt] and "✓" or ""
+                        ORow.TextColor3 = selected[opt] and T.ACCENT or T.TEXT
+                        RefreshSummary()
+                    end)
+                end
+
+                local open2 = false
+                ValBtn.MouseButton1Click:Connect(function() open2=not open2 ; Panel.Visible=open2 end)
+
+                return {
+                    Get = function()
+                        local list={}
+                        for _,opt in ipairs(options) do if selected[opt] then table.insert(list,opt) end end
+                        return list
+                    end,
+                    Set = function(list)
+                        selected={}
+                        for _,v in ipairs(list) do selected[v]=true end
+                        for opt,objs in pairs(rowObjs) do
+                            objs.chk.Text = selected[opt] and "✓" or ""
+                            objs.btn.TextColor3 = selected[opt] and T.ACCENT or T.TEXT
+                        end
+                        RefreshSummary()
+                    end,
+                }
+            end
+
+            function Cat:AddLabel(text, color)
+                local row, lbl = CatRow(text)
+                lbl.TextColor3 = color or T.DIM
+                lbl.Size = UDim2.new(1,-10,1,0)
+                lbl.Text = text
+                return { Set = function(t) lbl.Text=t end, SetColor = function(c) lbl.TextColor3=c end }
+            end
+
+            function Cat:AddTextInput(labelTxt, placeholder, callback)
+                Cat._count = Cat._count + 1
+                local row = NewFrame(Container, UDim2.new(1,0,0,58), nil, Color3.fromRGB(20,25,38))
+                row.LayoutOrder = Cat._count ; NewCorner(row,5) ; NewStroke(row, Color3.fromRGB(35,45,65))
+                NewLabel(row, labelTxt, 11, T.DIM, UDim2.new(0,10,0,4), UDim2.new(1,-10,0,16))
+                local IBox = Instance.new("TextBox")
+                IBox.Size=UDim2.new(1,-20,0,26) ; IBox.Position=UDim2.new(0,10,0,24)
+                IBox.BackgroundColor3=T.INPUT ; IBox.Font=Enum.Font.Code ; IBox.TextSize=12
+                IBox.TextColor3=T.ACCENT ; IBox.PlaceholderText=placeholder or "type here..."
+                IBox.PlaceholderColor3=T.DIM ; IBox.Text="" ; IBox.BorderSizePixel=0
+                IBox.ClearTextOnFocus=false ; IBox.Parent=row ; NewCorner(IBox,4) ; NewStroke(IBox,T.BORDER)
+                local p=Instance.new("UIPadding") ; p.PaddingLeft=UDim.new(0,8) ; p.Parent=IBox
+                IBox.FocusLost:Connect(function(enter) if enter and callback then pcall(callback,IBox.Text) end end)
+                return { Get=function() return IBox.Text end, Set=function(t) IBox.Text=t end }
+            end
+            Cat.AddTextbox = Cat.AddTextInput
+
+            function Cat:AddCheckbox(labelTxt, default, callback)
+                local row, _ = CatRow(labelTxt)
+                local state = (default == true)
+                local Box = NewFrame(row, UDim2.new(0,22,0,22), UDim2.new(1,-36,0.5,-11), state and T.ACCENT or T.INPUT)
+                NewCorner(Box,4) ; NewStroke(Box, state and T.ACCENT or T.BORDER)
+                local Chk = NewLabel(Box,"v",14,T.WHITE,UDim2.new(0,0,0,0),UDim2.new(1,0,1,0))
+                Chk.TextXAlignment=Enum.TextXAlignment.Center ; Chk.TextTransparency = state and 0 or 1
+                local HB = Instance.new("TextButton")
+                HB.Size=UDim2.new(1,0,1,0) ; HB.BackgroundTransparency=1 ; HB.Text="" ; HB.Parent=row
+                HB.MouseButton1Click:Connect(function()
+                    state=not state ; Box.BackgroundColor3=state and T.ACCENT or T.INPUT
+                    NewStroke(Box, state and T.ACCENT or T.BORDER) ; Chk.TextTransparency=state and 0 or 1
+                    if callback then pcall(callback,state) end
+                end)
+                return { Get=function() return state end }
+            end
+
+            function Cat:AddSeparator(labelTxt)
+                Cat._count = Cat._count + 1
+                local sep = NewFrame(Container, UDim2.new(1,0,0,18), nil, Color3.new(0,0,0))
+                sep.BackgroundTransparency = 1 ; sep.LayoutOrder = Cat._count
+                NewFrame(sep, UDim2.new(labelTxt and 0.4 or 1,0,0,1), UDim2.new(0,0,0.5,0), T.BORDER)
+                if labelTxt then
+                    local sl = NewLabel(sep, labelTxt, 9, T.DIM, UDim2.new(0.5,-40,0,0), UDim2.new(0,80,1,0))
+                    sl.TextXAlignment = Enum.TextXAlignment.Center
+                    NewFrame(sep, UDim2.new(0.4,0,0,1), UDim2.new(0.6,0,0.5,0), T.BORDER)
+                end
+            end
+
+            return Cat
+        end -- AddCategory
 
         -- ── Label ───────────────────────────────────────────
         function Tab:AddLabel(text, color)
@@ -1302,8 +1880,18 @@ function PHCzack:CreateWindow(config)
     if config.ApiUrl then KEY_CONFIG.API_URL = config.ApiUrl end
     if config.ApiSecret then KEY_CONFIG.API_SECRET = config.ApiSecret end
 
-    -- Fetch providers early to check weekend_free flag
+    -- Fetch providers early to check no_key_mode & weekend_free flags
     pcall(function() KeySystem.FetchProviders() end)
+
+    -- No-key-mode bypass: admin toggled "No Key Mode" ON — skip gate entirely
+    if KEY_CONFIG._no_key_mode == true then
+        local win = self:_CreateWindowInternal(config)
+        if config.OnKeyValidated then
+            pcall(config.OnKeyValidated, "NO_KEY_MODE", {no_key = true})
+        end
+        win:Show()
+        return win
+    end
 
     -- Weekend-free bypass: skip key gate entirely on Sat/Sun when enabled
     if KEY_CONFIG._weekend_free == true then
